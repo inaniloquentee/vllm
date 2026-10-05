@@ -3,7 +3,6 @@
 import torch
 
 import vllm.envs as envs
-
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -416,9 +415,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         use_deep_gemm = is_deep_gemm_supported()
         split_tokens = 1 if envs.VLLM_BATCH_INVARIANT else num_tokens
         n_splits = (
-            compute_mhc_pre_num_splits(input_size, split_tokens)
-            if use_deep_gemm
-            else 1
+            compute_mhc_pre_num_splits(input_size, split_tokens) if use_deep_gemm else 1
         )
         mixes = torch.empty(
             n_splits, num_tokens, mix_size, dtype=torch.float32, device=residual.device
@@ -585,6 +582,7 @@ def mhc_pre_tilelang(
         post_mix: shape (..., hc_mult), dtype torch.float32
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,

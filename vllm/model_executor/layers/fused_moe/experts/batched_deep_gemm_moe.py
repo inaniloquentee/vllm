@@ -7,8 +7,8 @@ import os
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -347,8 +347,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         max_num_tokens: int,
         num_dispatchers: int,
     ):
-        """
-        max_num_tokens: Maximum number of tokens from a DP Rank
+        """max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         quant_config: Quantization configuration
         """
@@ -397,8 +396,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         return True
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
-        """
-        DeepGemm supports packed ue8m0 activation scales on Blackwell-family
+        """DeepGemm supports packed ue8m0 activation scales on Blackwell-family
         GPUs (SM100 datacenter and SM120 consumer).
         """
         return is_deep_gemm_e8m0_used() and (
@@ -508,10 +506,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             else None
         )
         if os.environ.get("MLITE_VALIDATE_FINITE") == "1":
+            estimated_m = self.estimate_expected_m(
+                global_num_experts, max_num_tokens, topk_ids.size(-1)
+            )
             print(
                 "MLITE_DEEPGEMM_SHAPE "
-                f"estimated_m={self.estimate_expected_m(global_num_experts, max_num_tokens, topk_ids.size(-1))} "
-                f"actual_m={int(expert_num_tokens.max().item())} expected_m={expected_m}",
+                f"estimated_m={estimated_m} "
+                f"actual_m={int(expert_num_tokens.max().item())} "
+                f"expected_m={expected_m}",
                 flush=True,
             )
 
@@ -526,7 +528,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             self.w2_scale.contiguous().view(torch.uint8),
             w2_scale_guard.contiguous().view(torch.uint8),
         ):
-            raise RuntimeError("MLITE_MEMORY_CORRUPTION stage=deepgemm.fc1 target=w2_scale")
+            raise RuntimeError(
+                "MLITE_MEMORY_CORRUPTION stage=deepgemm.fc1 target=w2_scale"
+            )
         _validate_masked_finite("deepgemm.fc1", workspace1, expert_num_tokens)
 
         quant_scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
@@ -542,7 +546,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             self.w2_scale.contiguous().view(torch.uint8),
             w2_scale_guard.contiguous().view(torch.uint8),
         ):
-            raise RuntimeError("MLITE_MEMORY_CORRUPTION stage=deepgemm.a2q target=w2_scale")
+            raise RuntimeError(
+                "MLITE_MEMORY_CORRUPTION stage=deepgemm.a2q target=w2_scale"
+            )
 
         fp8_m_grouped_gemm_nt_masked(
             (a2q, a2q_scale),
@@ -555,7 +561,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             self.w2_scale.contiguous().view(torch.uint8),
             w2_scale_guard.contiguous().view(torch.uint8),
         ):
-            raise RuntimeError("MLITE_MEMORY_CORRUPTION stage=deepgemm.fc2 target=w2_scale")
+            raise RuntimeError(
+                "MLITE_MEMORY_CORRUPTION stage=deepgemm.fc2 target=w2_scale"
+            )
         if os.environ.get("MLITE_VALIDATE_FINITE") == "1":
             for expert, count in enumerate(expert_num_tokens.detach().cpu().tolist()):
                 if not count or bool(torch.isfinite(output[expert, :count]).all()):

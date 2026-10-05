@@ -175,6 +175,7 @@ def ds4_silu_mul_quant_fp8(
     *,
     use_ue8m0: bool,
     round_scale: bool | None = None,
+    clamp_limit: float | None = None,
     masked_m: torch.Tensor | None,
     output_q: torch.Tensor | None = None,
     group_size: int = 128,
