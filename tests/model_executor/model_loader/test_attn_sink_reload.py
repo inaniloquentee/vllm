@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 
 from vllm.model_executor.model_loader.attention_sink import load_padded_attn_sink
 from vllm.model_executor.model_loader.reload import layerwise
