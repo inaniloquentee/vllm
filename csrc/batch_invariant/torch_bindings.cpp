@@ -13,6 +13,7 @@ void top_k_per_row_prefill(const at::Tensor& logits,
                            const at::Tensor& row_ends, at::Tensor& indices,
                            int64_t num_rows, int64_t stride0, int64_t stride1,
                            int64_t top_k);
+
 void fused_silu_mul_per_token_group_quant(
     torch::Tensor input, torch::Tensor output_q, torch::Tensor output_s,
     int64_t group_size, double eps, double min_8bit, double max_8bit,
@@ -33,6 +34,7 @@ void combine_c128_swa_decode(torch::Tensor& combined_indices,
                              const torch::Tensor& is_valid, int64_t M,
                              int64_t N, int64_t top_k, int64_t compress_ratio,
                              int64_t window_size);
+
 }  // namespace vllm::batch_invariant
 
 TORCH_LIBRARY(vllm_batch_invariant, ops) {
