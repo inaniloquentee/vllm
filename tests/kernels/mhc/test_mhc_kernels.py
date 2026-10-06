@@ -34,6 +34,7 @@ from vllm.model_executor.layers.mhc import (
     MHCPreDelayedOp,
     MHCPreOp,
 )
+from vllm.model_executor.utils import register_derived_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
@@ -1709,7 +1710,7 @@ def _make_mhc_decoder_layer(hc_mult: int, hidden_size: int) -> DeepseekV4Decoder
         torch.randn(mix_hc, hc_mult * hidden_size, dtype=torch.float32),
         requires_grad=False,
     )
-    layer.hc_attn_fn_broadcast = None
+    register_derived_buffer(layer, "hc_attn_fn_broadcast")
     return layer
 
 
