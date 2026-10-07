@@ -31,6 +31,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
   ops.def(
+      "deterministic_top_k_per_row_prefill(Tensor logits, Tensor row_starts, "
+      "Tensor row_ends, Tensor! indices, int num_rows, int stride0, "
+      "int stride1, int top_k) -> ()");
+  ops.def(
       "fused_silu_mul_per_token_group_quant(Tensor input, Tensor! output_q, "
       "Tensor! output_s, int group_size, float eps, float min_8bit, "
       "float max_8bit, float clamp_limit, bool round_scale, bool scale_ue8m0, "
@@ -758,6 +762,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl(
+      "deterministic_top_k_per_row_prefill",
+      TORCH_BOX(&vllm::batch_invariant::deterministic_top_k_per_row_prefill));
   ops.impl(
       "fused_silu_mul_per_token_group_quant",
       TORCH_BOX(&vllm::batch_invariant::fused_silu_mul_per_token_group_quant));

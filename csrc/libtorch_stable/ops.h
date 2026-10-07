@@ -45,6 +45,12 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
 
 #ifndef USE_ROCM
 namespace vllm::batch_invariant {
+void deterministic_top_k_per_row_prefill(
+    const torch::stable::Tensor& logits,
+    const torch::stable::Tensor& row_starts,
+    const torch::stable::Tensor& row_ends, torch::stable::Tensor& indices,
+    int64_t num_rows, int64_t stride0, int64_t stride1, int64_t top_k);
+
 void fused_silu_mul_per_token_group_quant(
     const torch::stable::Tensor& input, torch::stable::Tensor& output_q,
     torch::stable::Tensor& output_s, int64_t group_size, double eps,
