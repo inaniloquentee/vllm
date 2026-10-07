@@ -28,6 +28,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+
+#ifndef USE_ROCM
+  ops.def(
+      "deterministic_top_k_per_row_prefill(Tensor logits, Tensor row_starts, "
+      "Tensor row_ends, Tensor! indices, int num_rows, int stride0, "
+      "int stride1, int top_k) -> ()");
   ops.def(
       "combine_topk_swa_decode(Tensor! combined_indices, "
       "Tensor! combined_lens, Tensor topk_indices, Tensor seq_lens, "
@@ -38,11 +44,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! combined_lens, Tensor seq_lens, Tensor is_valid, int M, "
       "int N, int top_k, int compress_ratio, int window_size) -> ()");
 
-#ifndef USE_ROCM
-  ops.def(
-      "deterministic_top_k_per_row_prefill(Tensor logits, Tensor row_starts, "
-      "Tensor row_ends, Tensor! indices, int num_rows, int stride0, "
-      "int stride1, int top_k) -> ()");
   ops.def(
       "fused_silu_mul_per_token_group_quant(Tensor input, Tensor! output_q, "
       "Tensor! output_s, int group_size, float eps, float min_8bit, "
