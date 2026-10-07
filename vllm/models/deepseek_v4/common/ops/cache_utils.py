@@ -801,14 +801,6 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
-        combined_indices.fill_(-1)
-
-    if envs.VLLM_BATCH_INVARIANT and topk:
-        # The prefill radix top-k kernel guarantees the selected set but not
-        # its order. FlashMLA consumes indices in-order, so different legal
-        # permutations otherwise change the floating-point reduction and make
-        # repeated runs diverge once the candidate count exceeds ``topk``.
-        topk_indices = _canonicalize_sparse_topk_indices(topk_indices)
     use_fused_decode = (
         envs.VLLM_BATCH_INVARIANT
         and decode_is_valid is not None
@@ -832,6 +824,16 @@ def combine_topk_swa_indices(
             window_size,
         )
         return combined_indices, combined_lens
+
+    if out is not None:
+        combined_indices.fill_(-1)
+
+    if envs.VLLM_BATCH_INVARIANT and topk:
+        # The prefill radix top-k kernel guarantees the selected set but not
+        # its order. FlashMLA consumes indices in-order, so different legal
+        # permutations otherwise change the floating-point reduction and make
+        # repeated runs diverge once the candidate count exceeds ``topk``.
+        topk_indices = _canonicalize_sparse_topk_indices(topk_indices)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
