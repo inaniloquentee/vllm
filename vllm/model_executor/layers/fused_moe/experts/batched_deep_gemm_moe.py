@@ -4,8 +4,8 @@
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -308,8 +308,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         max_num_tokens: int,
         num_dispatchers: int,
     ):
-        """
-        max_num_tokens: Maximum number of tokens from a DP Rank
+        """max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         quant_config: Quantization configuration
         """
@@ -358,8 +357,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         return True
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
-        """
-        DeepGemm supports packed ue8m0 activation scales on Blackwell-family
+        """DeepGemm supports packed ue8m0 activation scales on Blackwell-family
         GPUs (SM100 datacenter and SM120 consumer).
         """
         return is_deep_gemm_e8m0_used() and (
