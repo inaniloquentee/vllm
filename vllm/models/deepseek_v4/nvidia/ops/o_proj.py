@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,

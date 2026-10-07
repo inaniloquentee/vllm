@@ -1060,6 +1060,7 @@ def test_mhc_pre_batch_invariance(monkeypatch, hidden_size, hc_mult):
                     f"batch invariance broken: num_tokens={num_tokens} pos={pos}"
                 )
 
+
 @pytest.mark.skipif(
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",
