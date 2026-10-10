@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -17,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    fused_silu_mul_per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     get_fp8_min_max,
@@ -137,6 +141,7 @@ def persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    clamp_limit: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -191,6 +196,22 @@ def persistent_masked_m_silu_mul_quant(
     assert H % 8 == 0, "H must be divisible by 8"
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
+
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        if quant_scale_fmt not in (
+            DeepGemmQuantScaleFMT.FLOAT32,
+            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+            DeepGemmQuantScaleFMT.UE8M0,
+        ):
+            raise RuntimeError(f"unsupported batch-invariant scale: {quant_scale_fmt}")
+        return fused_silu_mul_per_token_group_quant_fp8(
+            y,
+            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+            clamp_limit=clamp_limit,
+            masked_m=tokens_per_expert,
+            group_size=group_size,
+        )
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
