@@ -439,16 +439,13 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
         return
 
     # The post mapping and the collapse are what the unfused kernels produce.
-    # The two kernels may round a near-midpoint residual differently (FMA
-    # contraction is up to the compiler), so allow one bf16 ulp there and
-    # check the collapse against the fused kernel's own residual.
     residual_ref = torch.ops.vllm.mhc_post_tilelang(
         x, residual, post_layer_mix, comb_res_mix
     )
     layer_input_ref = mhc_pre_delayed_tilelang(
-        residual_cur, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
+        residual_ref, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
     )[2]
-    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=2**-7)
+    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=0)
     torch.testing.assert_close(layer_input, layer_input_ref, atol=0, rtol=0)
 
     post_ref, comb_ref, _, next_pre_ref = mhc_fused_post_pre_delayed_ref(
@@ -1000,6 +997,68 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult, fused_norm):
 
     for actual, expected in zip(out, ref, strict=True):
         torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_batch_invariance(monkeypatch, hidden_size, hc_mult):
+    """One token's output must be bitwise independent of the batch it runs in."""
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    pool = 2048
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = 2 * hc_mult + hc_mult2
+    residual_pool = torch.randn((pool, hc_mult, hidden_size), dtype=torch.bfloat16)
+    fn = (
+        torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float)
+        * 1e-4
+        * (1 + torch.arange(hc_mult).mul(0.01).view(1, -1, 1))
+    ).flatten(1, 2)
+    hc_scale = torch.randn((3,), dtype=torch.float) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float) * 0.1
+    norm_weight = torch.ones((hidden_size,), dtype=torch.bfloat16)
+
+    hc_sinkhorn_eps = hc_pre_eps = rms_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+
+    def run(residual):
+        return torch.ops.vllm.mhc_pre_tilelang(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_alpha,
+            sinkhorn_repeat,
+            1,
+            norm_weight,
+            norm_eps,
+        )
+
+    anchor = residual_pool[0:1].clone()
+    ref = run(anchor)
+
+    for num_tokens in (1, 2, 7, 63, 64, 65, 127, 128, 129, 511, 512, 1000):
+        filler = residual_pool[1:num_tokens]
+        for pos in sorted({0, num_tokens // 2, num_tokens - 1}):
+            batch = torch.cat([filler[:pos], anchor, filler[pos:]], dim=0)
+            assert batch.shape[0] == num_tokens
+            for actual, expected in zip(run(batch), ref, strict=True):
+                assert torch.equal(actual[pos : pos + 1], expected), (
+                    f"batch invariance broken: num_tokens={num_tokens} pos={pos}"
+                )
 
 
 @pytest.mark.skipif(
