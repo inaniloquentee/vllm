@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -35,6 +36,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
+    supports_deep_gemm_batch_invariance,
 )
 from vllm.utils.math_utils import cdiv, round_up
 
@@ -340,6 +342,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         )
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -348,6 +351,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return supports_deep_gemm_batch_invariance()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -433,6 +440,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         estimate = min(max_tokens_per_expert, estimate)
         return estimate
 
+    @eager_break_during_capture
     def apply(
         self,
         output: torch.Tensor,
@@ -468,11 +476,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        expected_m = self.estimate_expected_m(
-            global_num_experts=global_num_experts,
-            max_tokens_per_expert=max_num_tokens,
-            topk=topk_ids.size(-1),
-        )
+        # A static padded capacity keeps the launch shape graph-safe.
+        expected_m = max_num_tokens
 
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
@@ -487,6 +492,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
+            clamp_limit=self.gemm1_clamp_limit,
         )
 
         fp8_m_grouped_gemm_nt_masked(
