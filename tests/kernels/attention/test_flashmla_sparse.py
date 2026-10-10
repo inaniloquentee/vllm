@@ -7,9 +7,8 @@ import torch
 from torch import nn
 
 import vllm.models.deepseek_v4.nvidia.flashmla as flashmla_module
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
-
 from vllm.models.deepseek_v4.common.ops.cache_utils import combine_topk_swa_indices
+from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 
 
