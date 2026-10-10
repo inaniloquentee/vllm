@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -17,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    fused_silu_mul_per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     get_fp8_min_max,
@@ -83,7 +87,6 @@ def _silu_mul_fp8_quant_deep_gemm(
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     ceil_ue8m0: tl.constexpr,
-    clamp_limit,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -115,14 +118,6 @@ def _silu_mul_fp8_quant_deep_gemm(
             input_ptr + base_gate_offset + t * stride_i_t, mask=mask, other=0.0
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
-
-        if clamp_limit > 0.0:
-            gate = tl.minimum(gate, clamp_limit).to(input_ptr.dtype.element_ty)
-            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit).to(
-                input_ptr.dtype.element_ty
-            )
-
-        up = up.to(tl.float32)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
@@ -202,6 +197,22 @@ def persistent_masked_m_silu_mul_quant(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        if quant_scale_fmt not in (
+            DeepGemmQuantScaleFMT.FLOAT32,
+            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+            DeepGemmQuantScaleFMT.UE8M0,
+        ):
+            raise RuntimeError(f"unsupported batch-invariant scale: {quant_scale_fmt}")
+        return fused_silu_mul_per_token_group_quant_fp8(
+            y,
+            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+            clamp_limit=clamp_limit,
+            masked_m=tokens_per_expert,
+            group_size=group_size,
+        )
+
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
     fp8_dtype = current_platform.fp8_dtype()
@@ -220,12 +231,11 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
         DeepGemmQuantScaleFMT.UE8M0,
     ]
-    clamp_limit = 0.0 if clamp_limit is None else clamp_limit
 
     # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path below.
     if current_platform.is_cuda() and current_platform.has_device_capability(80):
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0, clamp_limit
+            y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
@@ -285,7 +295,6 @@ def persistent_masked_m_silu_mul_quant(
             fp8_min,
             fp8_max,
             ceil_ue8m0,
-            clamp_limit,
             BLOCK=group_size,
             NUM_STAGES=4,
             num_warps=1,
