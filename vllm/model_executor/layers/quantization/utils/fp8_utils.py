@@ -103,7 +103,7 @@ def fused_silu_mul_per_token_group_quant_fp8(
             device=input.device,
             dtype=torch.int32 if use_ue8m0 else torch.float32,
         )
-    output_s.zero_()
+        output_s.zero_()
 
     torch.ops._C.fused_silu_mul_per_token_group_quant(
         input,
