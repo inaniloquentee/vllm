@@ -155,8 +155,8 @@ def _gated_silu_mul_round_once(
     in one place; do not re-implement it in a caller.
     """
     if HAS_CLAMP:
-        gate = tl.minimum(gate, clamp_limit)
-        up = tl.clamp(up, -clamp_limit, clamp_limit)
+        gate = tl.minimum(gate, clamp_limit).to(tl.bfloat16).to(tl.float32)
+        up = tl.clamp(up, -clamp_limit, clamp_limit).to(tl.bfloat16).to(tl.float32)
 
     # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
     #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
@@ -176,12 +176,11 @@ def _gated_silu_mul_narrow(
     HAS_CLAMP: tl.constexpr,
     NARROW_DTYPE: tl.constexpr,
 ):
-    """SiLU-gated product with the C++ ``silu_and_mul`` rounding points.
+    """SiLU-gated product with one activation-dtype rounding point.
 
     ``act_in``/``mul_in`` are in the activation dtype. Clamp in fp32 then store
-    back to the input dtype, run silu in fp32 then narrow, and do the mul at
-    input precision so HAS_CLAMP True/False share the same multiplication
-    path. Returns fp32.
+    back to the input dtype, run SiLU and multiplication in fp32, then narrow
+    the product. Returns fp32.
 
     Shared by the dense colmajor quantizer
     (``_silu_mul_per_token_group_quant_fp8_colmajor``) and its masked-layout
@@ -195,12 +194,10 @@ def _gated_silu_mul_narrow(
         )
     # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
     #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
-    # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
-    # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
     act_in = act_in.to(tl.float32)
-    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(NARROW_DTYPE)
-    up = (mul_in.to(tl.float32) + beta).to(NARROW_DTYPE)
-    return (glu * up).to(tl.float32)
+    glu = act_in / (1.0 + tl.exp(-act_in * alpha))
+    up = mul_in.to(tl.float32) + beta
+    return (glu * up).to(NARROW_DTYPE).to(tl.float32)
 
 
 @triton.jit
@@ -279,12 +276,17 @@ def _silu_mul_quant_fp8_packed_kernel(
 
         y = _gated_silu_mul_round_once(gate, up, clamp_limit, alpha, beta, HAS_CLAMP)
 
-        absmax = tl.max(tl.abs(y), axis=2)
-        scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
-        exponent = tl.ceil(tl.log2(scale_raw))
-        scale = tl.math.exp2(exponent)
+        absmax = tl.maximum(tl.max(tl.abs(y), axis=2), 1e-10)
+        scale_raw = absmax * (1.0 / fp8_max)
+        scale_bits = scale_raw.to(tl.int32, bitcast=True)
+        exponent = (
+            ((scale_bits >> 23) & 0xFF)
+            - 127
+            + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+        )
+        inv_scale = tl.math.exp2(-exponent.to(tl.float32))
 
-        y_q = tl.clamp(y / scale[:, :, None], fp8_min, fp8_max)
+        y_q = tl.clamp(y * inv_scale[:, :, None], fp8_min, fp8_max)
 
         y_q_flat = tl.reshape(y_q, (BLOCK_M, elems_per_cta))
         tl.store(
@@ -479,17 +481,25 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
             act_in = tl.load(act_in_ptrs)
             mul_in = tl.load(act_in_ptrs + N_2)
 
-        # silu & mul with the C++ silu_and_mul rounding points (see helper).
+        # Share the activation rounding with the masked path.
         y = _gated_silu_mul_narrow(
             act_in, mul_in, clamp_limit, alpha, beta, HAS_CLAMP, y_ptr.dtype.element_ty
         )
 
-        # quant
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-        scale_raw = _absmax * (1.0 / fp8_max)
-        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        if use_ue8m0:
+            scale_raw = _absmax * (1.0 / fp8_max)
+            scale_bits = scale_raw.to(tl.int32, bitcast=True)
+            exponent = (
+                ((scale_bits >> 23) & 0xFF)
+                - 127
+                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+            )
+            y_s = tl.math.exp2(exponent.to(tl.float32))
+        else:
+            y_s = tl.div_rn(_absmax, fp8_max)
         y_s = tl.reshape(y_s, (BLOCK_M, 1))
-        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
         # store y_q
         base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
@@ -676,12 +686,20 @@ def _silu_mul_fp8_quant_masked_kernel(
             input_ptr.dtype.element_ty,
         )
 
-        # quant: identical expressions to the dense colmajor kernel
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-        scale_raw = _absmax * (1.0 / fp8_max)
-        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        if use_ue8m0:
+            scale_raw = _absmax * (1.0 / fp8_max)
+            scale_bits = scale_raw.to(tl.int32, bitcast=True)
+            exponent = (
+                ((scale_bits >> 23) & 0xFF)
+                - 127
+                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+            )
+            y_s = tl.math.exp2(exponent.to(tl.float32))
+        else:
+            y_s = tl.div_rn(_absmax, fp8_max)
         y_s = tl.reshape(y_s, (BLOCK_T, 1))
-        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
         yq_off = (
             e * stride_yq_e
@@ -760,12 +778,16 @@ def _silu_mul_fp8_quant_masked_packed_kernel(
 
         y = _gated_silu_mul_round_once(gate, up, clamp_limit, alpha, beta, HAS_CLAMP)
 
-        # quant: identical expressions to the dense packed kernel
-        absmax = tl.max(tl.abs(y), axis=1)
-        scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
-        exponent = tl.ceil(tl.log2(scale_raw))
-        scale = tl.math.exp2(exponent)
-        y_q = tl.clamp(y / scale[:, None], fp8_min, fp8_max)
+        absmax = tl.maximum(tl.max(tl.abs(y), axis=1), 1e-10)
+        scale_raw = absmax * (1.0 / fp8_max)
+        scale_bits = scale_raw.to(tl.int32, bitcast=True)
+        exponent = (
+            ((scale_bits >> 23) & 0xFF)
+            - 127
+            + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+        )
+        inv_scale = tl.math.exp2(-exponent.to(tl.float32))
+        y_q = tl.clamp(y * inv_scale[:, None], fp8_min, fp8_max)
 
         yq_off = e * stride_yq_e + t[:, None] * stride_yq_t + col * stride_yq_h
         tl.store(y_q_ptr + yq_off, y_q.to(y_q_ptr.dtype.element_ty), mask)
