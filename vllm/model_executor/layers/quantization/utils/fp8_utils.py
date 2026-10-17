@@ -864,8 +864,12 @@ def silu_mul_fp8_quant_masked_triton(
         packs = triton.cdiv(G, 4)
         assert y_s.shape == (E, T, packs)
         BLOCK_T = 8 if T <= 16 else 16 if T <= 32 and E >= 128 else 32
-        split = 4 if T >= 128 else 2 if T >= 64 else _masked_quant_token_splits(
-            E * packs, T, BLOCK_T, y.device
+        split = (
+            4
+            if T >= 128
+            else 2
+            if T >= 64
+            else _masked_quant_token_splits(E * packs, T, BLOCK_T, y.device)
         )
         _silu_mul_fp8_quant_masked_packed_kernel[(E * packs * split,)](
             y,
