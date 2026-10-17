@@ -863,7 +863,7 @@ def silu_mul_fp8_quant_masked_triton(
         assert use_ue8m0, "packed int32 scales are always UE8M0"
         packs = triton.cdiv(G, 4)
         assert y_s.shape == (E, T, packs)
-        BLOCK_T = 32
+        BLOCK_T = 8 if T <= 16 else 16 if T <= 32 and E >= 128 else 32
         split = _masked_quant_token_splits(E * packs, T, BLOCK_T, y.device)
         _silu_mul_fp8_quant_masked_packed_kernel[(E * packs * split,)](
             y,
@@ -885,7 +885,7 @@ def silu_mul_fp8_quant_masked_triton(
             HAS_CLAMP=has_clamp,
             BLOCK_T=BLOCK_T,
             SPLIT_T=split,
-            num_warps=8,
+            num_warps=4 if BLOCK_T <= 16 else 8,
         )
         return
 
@@ -893,7 +893,7 @@ def silu_mul_fp8_quant_masked_triton(
     # Same fp8 range the dense colmajor kernel uses (224 for fnuz).
     fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
     fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
-    BLOCK_T = 16
+    BLOCK_T = 8 if T <= 16 else 32 if T >= 64 else 16
     split = _masked_quant_token_splits(E * G, T, BLOCK_T, y.device)
     _silu_mul_fp8_quant_masked_kernel[(E * G * split,)](
         y,
@@ -917,7 +917,7 @@ def silu_mul_fp8_quant_masked_triton(
         HAS_CLAMP=has_clamp,
         BLOCK_T=BLOCK_T,
         SPLIT_T=split,
-        num_warps=4,
+        num_warps=4 if BLOCK_T <= 16 else 8,
     )
 
 
