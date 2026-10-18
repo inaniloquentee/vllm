@@ -335,7 +335,7 @@ SCALE_FMTS = [
 )
 # 5 groups (pack padding), 16 groups (DeepSeek-V4-Flash), 24 groups (V4-Pro)
 @pytest.mark.parametrize("H", [128 * 5, 2048, 3072])
-@pytest.mark.parametrize("clamp_limit", [None, 10.0])
+@pytest.mark.parametrize("clamp_limit", [None, 0.0, 10.0])
 @pytest.mark.parametrize("scale_fmt", SCALE_FMTS)
 @torch.inference_mode()
 def test_batch_invariant_masked_quant_matches_dense(
@@ -390,15 +390,17 @@ def test_batch_invariant_masked_quant_matches_dense(
 
 
 @pytest.mark.parametrize("scale_fmt", SCALE_FMTS)
+@pytest.mark.parametrize("limit", [0.0, 10.0])
 @torch.inference_mode()
-def test_persistent_masked_quant_applies_clamp(scale_fmt: DeepGemmQuantScaleFMT):
+def test_persistent_masked_quant_applies_clamp(
+    scale_fmt: DeepGemmQuantScaleFMT, limit: float
+):
     """clamp_limit must act like the dense kernels: fp32 min/max on gate and
     up, then narrow to bf16. Pre-clamping the input is exact under that rule,
     so the two runs must match byte for byte, and the clamp must change the
     output relative to no clamp."""
     set_random_seed(42)
     E, T, H = 2, 64, 256
-    limit = 10.0
     y = torch.randn(E, T, 2 * H, device=DEVICE, dtype=torch.bfloat16) * 8
     counts = torch.tensor([64, 17], device=DEVICE, dtype=torch.int32)
     y_clamped = y.clone()

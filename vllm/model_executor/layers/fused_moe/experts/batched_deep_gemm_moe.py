@@ -247,14 +247,14 @@ def persistent_masked_m_silu_mul_quant(
         )
     elif current_platform.is_cuda() and current_platform.has_device_capability(80):
         # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path
-        # below. A clamp_limit of 0.0 disables the clamp in the kernel.
+        # below. A negative clamp_limit disables the clamp in the kernel.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y,
             tokens_per_expert,
             y_q,
             y_s,
             ceil_ue8m0,
-            0.0 if clamp_limit is None else float(clamp_limit),
+            -1.0 if clamp_limit is None else float(clamp_limit),
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by

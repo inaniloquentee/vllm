@@ -282,7 +282,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
     Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e,
-    // SwiGLU clamp limit (swiglu_limit); <= 0 disables the clamp.
+    // SwiGLU clamp limit (swiglu_limit); negative disables the clamp.
     float clamp_limit) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
@@ -508,7 +508,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       for (int32_t k = 0; k < 2; ++k) {
         float2 gate_f = __bfloat1622float2(s_gate_comp[k]);
         __nv_bfloat162 up = s_up_comp[k];
-        if (clamp_limit > 0.0f) {
+        if (clamp_limit >= 0.0f) {
           // Same arithmetic as the dense Triton quantizers
           // (silu_mul_per_token_group_quant_fp8_colmajor): clamp in fp32,
           // narrow back to bf16, then run SiLU on the narrowed value.
@@ -617,7 +617,7 @@ void persistent_masked_m_silu_mul_quant(
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
     bool cast_scale_ue8m0,
-    double clamp_limit) {  // SwiGLU clamp (swiglu_limit); <= 0 disables it
+    double clamp_limit) {  // SwiGLU clamp (swiglu_limit); negative disables it
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
