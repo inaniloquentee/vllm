@@ -820,6 +820,19 @@ def _masked_quant_token_splits(
     return split
 
 
+def _masked_quant_packed_token_splits(
+    num_programs: int, T: int, block_t: int, num_warps: int, device: torch.device
+) -> int:
+    split = _masked_quant_token_splits(num_programs, T, block_t, device)
+    if num_warps < 8:
+        return split
+
+    # Keep wide packed tiles to one token block per program when possible.
+    while T // (split * 2) >= block_t:
+        split *= 2
+    return split
+
+
 def silu_mul_fp8_quant_masked_triton(
     y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) int32
@@ -864,12 +877,9 @@ def silu_mul_fp8_quant_masked_triton(
         packs = triton.cdiv(G, 4)
         assert y_s.shape == (E, T, packs)
         BLOCK_T = 8 if T <= 16 else 16 if T <= 32 and E >= 128 else 32
-        split = (
-            4
-            if T >= 128
-            else 2
-            if T >= 64
-            else _masked_quant_token_splits(E * packs, T, BLOCK_T, y.device)
+        num_warps = 4 if BLOCK_T <= 16 else 8
+        split = _masked_quant_packed_token_splits(
+            E * packs, T, BLOCK_T, num_warps, y.device
         )
         _silu_mul_fp8_quant_masked_packed_kernel[(E * packs * split,)](
             y,
@@ -891,7 +901,7 @@ def silu_mul_fp8_quant_masked_triton(
             HAS_CLAMP=has_clamp,
             BLOCK_T=BLOCK_T,
             SPLIT_T=split,
-            num_warps=4 if BLOCK_T <= 16 else 8,
+            num_warps=num_warps,
         )
         return
 
