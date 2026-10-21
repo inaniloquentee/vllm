@@ -145,18 +145,22 @@ def _gated_silu_mul_round_once(
     alpha,
     beta,
     HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
 ):
-    """fp32 SiLU-gated product, rounded once through bf16.
+    """fp32 SiLU-gated product, rounded through bf16.
 
     Shared by the dense packed-UE8M0 quantizer
     (``_silu_mul_quant_fp8_packed_kernel``) and its masked-layout twin
     (``_silu_mul_fp8_quant_masked_packed_kernel``) so a token quantizes to the
-    same bytes on the dense and the masked MoE paths. Keep the arithmetic here
-    in one place; do not re-implement it in a caller.
+    same bytes on the dense and masked MoE paths in BI mode. The default dense
+    path retains its original pre-clamp rounding behavior.
     """
     if HAS_CLAMP:
-        gate = tl.minimum(gate, clamp_limit).to(tl.bfloat16).to(tl.float32)
-        up = tl.clamp(up, -clamp_limit, clamp_limit).to(tl.bfloat16).to(tl.float32)
+        gate = tl.minimum(gate, clamp_limit)
+        up = tl.clamp(up, -clamp_limit, clamp_limit)
+        if BI_NUMERICS:
+            gate = gate.to(tl.bfloat16).to(tl.float32)
+            up = up.to(tl.bfloat16).to(tl.float32)
 
     # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
     #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
@@ -175,17 +179,18 @@ def _gated_silu_mul_narrow(
     beta,
     HAS_CLAMP: tl.constexpr,
     NARROW_DTYPE: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
 ):
-    """SiLU-gated product with one activation-dtype rounding point.
+    """SiLU-gated product with BI or legacy activation rounding.
 
     ``act_in``/``mul_in`` are in the activation dtype. Clamp in fp32 then store
-    back to the input dtype, run SiLU and multiplication in fp32, then narrow
-    the product. Returns fp32.
+    back to the input dtype. BI narrows the final product once; the default
+    dense path narrows each operand before multiplication. Returns fp32.
 
     Shared by the dense colmajor quantizer
     (``_silu_mul_per_token_group_quant_fp8_colmajor``) and its masked-layout
     twin (``_silu_mul_fp8_quant_masked_kernel``) so a token quantizes to the
-    same bytes on the dense and the masked MoE paths.
+    same bytes on the dense and masked MoE paths in BI mode.
     """
     if HAS_CLAMP:
         act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(NARROW_DTYPE)
@@ -195,9 +200,13 @@ def _gated_silu_mul_narrow(
     # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
     #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
     act_in = act_in.to(tl.float32)
-    glu = act_in / (1.0 + tl.exp(-act_in * alpha))
-    up = mul_in.to(tl.float32) + beta
-    return (glu * up).to(NARROW_DTYPE).to(tl.float32)
+    if BI_NUMERICS:
+        glu = act_in / (1.0 + tl.exp(-act_in * alpha))
+        up = mul_in.to(tl.float32) + beta
+        return (glu * up).to(NARROW_DTYPE).to(tl.float32)
+    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(NARROW_DTYPE)
+    up = (mul_in.to(tl.float32) + beta).to(NARROW_DTYPE)
+    return (glu * up).to(tl.float32)
 
 
 @triton.jit
@@ -222,6 +231,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
     EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
@@ -274,19 +284,27 @@ def _silu_mul_quant_fp8_packed_kernel(
         )
         up = tl.reshape(up_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(tl.float32)
 
-        y = _gated_silu_mul_round_once(gate, up, clamp_limit, alpha, beta, HAS_CLAMP)
-
-        absmax = tl.maximum(tl.max(tl.abs(y), axis=2), 1e-10)
-        scale_raw = absmax * (1.0 / fp8_max)
-        scale_bits = scale_raw.to(tl.int32, bitcast=True)
-        exponent = (
-            ((scale_bits >> 23) & 0xFF)
-            - 127
-            + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+        y = _gated_silu_mul_round_once(
+            gate, up, clamp_limit, alpha, beta, HAS_CLAMP, BI_NUMERICS
         )
-        inv_scale = tl.math.exp2(-exponent.to(tl.float32))
 
-        y_q = tl.clamp(y * inv_scale[:, :, None], fp8_min, fp8_max)
+        if BI_NUMERICS:
+            absmax = tl.maximum(tl.max(tl.abs(y), axis=2), 1e-10)
+            scale_raw = absmax * (1.0 / fp8_max)
+            scale_bits = scale_raw.to(tl.int32, bitcast=True)
+            exponent = (
+                ((scale_bits >> 23) & 0xFF)
+                - 127
+                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+            )
+            inv_scale = tl.math.exp2(-exponent.to(tl.float32))
+            y_q = tl.clamp(y * inv_scale[:, :, None], fp8_min, fp8_max)
+        else:
+            absmax = tl.max(tl.abs(y), axis=2)
+            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+            exponent = tl.ceil(tl.log2(scale_raw))
+            scale = tl.math.exp2(exponent)
+            y_q = tl.clamp(y / scale[:, :, None], fp8_min, fp8_max)
 
         y_q_flat = tl.reshape(y_q, (BLOCK_M, elems_per_cta))
         tl.store(
@@ -412,6 +430,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        BI_NUMERICS=envs.VLLM_BATCH_INVARIANT,
         EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -439,6 +458,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
     # Meta-parameters
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -483,23 +503,38 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
         # Share the activation rounding with the masked path.
         y = _gated_silu_mul_narrow(
-            act_in, mul_in, clamp_limit, alpha, beta, HAS_CLAMP, y_ptr.dtype.element_ty
+            act_in,
+            mul_in,
+            clamp_limit,
+            alpha,
+            beta,
+            HAS_CLAMP,
+            y_ptr.dtype.element_ty,
+            BI_NUMERICS,
         )
 
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-        if use_ue8m0:
-            scale_raw = _absmax * (1.0 / fp8_max)
-            scale_bits = scale_raw.to(tl.int32, bitcast=True)
-            exponent = (
-                ((scale_bits >> 23) & 0xFF)
-                - 127
-                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
-            )
-            y_s = tl.math.exp2(exponent.to(tl.float32))
+        if BI_NUMERICS:
+            if use_ue8m0:
+                scale_raw = _absmax * (1.0 / fp8_max)
+                scale_bits = scale_raw.to(tl.int32, bitcast=True)
+                exponent = (
+                    ((scale_bits >> 23) & 0xFF)
+                    - 127
+                    + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+                )
+                y_s = tl.math.exp2(exponent.to(tl.float32))
+            else:
+                y_s = tl.div_rn(_absmax, fp8_max)
         else:
-            y_s = tl.div_rn(_absmax, fp8_max)
+            scale_raw = _absmax * (1.0 / fp8_max)
+            y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
         y_s = tl.reshape(y_s, (BLOCK_M, 1))
-        y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        if BI_NUMERICS:
+            y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max)
+        else:
+            y_q = tl.clamp(y / y_s, fp8_min, fp8_max)
+        y_q = y_q.to(y_q_ptr.dtype.element_ty)
 
         # store y_q
         base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
@@ -609,6 +644,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         fp8_max,
         use_ue8m0,
         has_clamp,
+        envs.VLLM_BATCH_INVARIANT,
         GROUP_SIZE,
         BLOCK_M,
         BLOCK_N,
@@ -684,6 +720,7 @@ def _silu_mul_fp8_quant_masked_kernel(
             beta,
             HAS_CLAMP,
             input_ptr.dtype.element_ty,
+            True,
         )
 
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
@@ -776,7 +813,9 @@ def _silu_mul_fp8_quant_masked_packed_kernel(
             tl.float32
         )
 
-        y = _gated_silu_mul_round_once(gate, up, clamp_limit, alpha, beta, HAS_CLAMP)
+        y = _gated_silu_mul_round_once(
+            gate, up, clamp_limit, alpha, beta, HAS_CLAMP, True
+        )
 
         absmax = tl.maximum(tl.max(tl.abs(y), axis=1), 1e-10)
         scale_raw = absmax * (1.0 / fp8_max)
