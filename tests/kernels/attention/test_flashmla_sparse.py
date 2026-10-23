@@ -1094,6 +1094,7 @@ def test_decode_sparse_reuses_prefill_kernel(
     fused_c128 = compress_ratio == 128 and hasattr(
         torch.ops._C, "combine_c128_swa_decode"
     )
+    monkeypatch.setattr(flashmla_module.envs, "VLLM_BATCH_INVARIANT", fused_c128)
     if fused_c128:
 
         def fake_fused_c128(indices, lengths, *args):
@@ -1205,6 +1206,7 @@ def test_decode_sparse_fails_closed_without_scheduler_metadata(
             output=torch.empty((2, 2, 8), dtype=torch.bfloat16),
         )
 
+
 @pytest.mark.parametrize("context_len", [0, 20, 127, 900])
 def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
     """Every DSpark draft token attends to the whole block, fused or not.
@@ -1285,196 +1287,6 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
     _assert_projects_alike(z_unfused, z_fused)
 
 
-class _WorkspaceManager:
-    def get_simultaneous(self, *specs):
-        return tuple(torch.empty(shape, dtype=dtype) for shape, dtype in specs)
-
-
-def _attention(compress_ratio: int) -> DeepseekV4FlashMLAAttention:
-    attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
-    nn.Module.__init__(attention)
-    attention.compress_ratio = compress_ratio
-    attention.window_size = 4
-    attention.scale = 0.125
-    attention.attn_sink = torch.zeros(2, dtype=torch.float32)
-    attention.topk_indices_buffer = torch.tensor(
-        [[0, 1, 2, 3, -1, -1, -1, -1]] * 8,
-        dtype=torch.int32,
-    )
-    attention.swa_cache_layer = SimpleNamespace(
-        kv_cache=torch.empty((2, 256, 584), dtype=torch.uint8)
-    )
-    return attention
-
-
-def _swa_metadata():
-    return SimpleNamespace(
-        num_decodes=2,
-        num_decode_tokens=2,
-        seq_lens=torch.tensor([3, 5], dtype=torch.int32),
-        seq_lens_cpu=torch.tensor([3, 5], dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
-        is_valid_token=torch.tensor([True, True]),
-        decode_swa_indices=torch.zeros((2, 1, 4), dtype=torch.int32),
-        decode_swa_lens=torch.tensor([3, 4], dtype=torch.int32),
-        block_table=torch.zeros((2, 2), dtype=torch.int32),
-        block_size=256,
-    )
-
-
-@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
-def test_decode_sparse_reuses_prefill_kernel(
-    monkeypatch: pytest.MonkeyPatch,
-    compress_ratio: int,
-):
-    attention = _attention(compress_ratio)
-    swa_metadata = _swa_metadata()
-    q = torch.zeros((2, 2, 8), dtype=torch.bfloat16)
-    output = torch.empty_like(q)
-    compressed_cache = (
-        None
-        if compress_ratio == 1
-        else torch.empty((2, 256 // compress_ratio, 584), dtype=torch.uint8)
-    )
-    attn_metadata = (
-        None
-        if compress_ratio == 1
-        else SimpleNamespace(
-            block_table=torch.zeros((2, 2), dtype=torch.int32),
-            block_size=256,
-            c128a_global_decode_topk_indices=(
-                torch.zeros((2, 1, 128), dtype=torch.int32)
-                if compress_ratio == 128
-                else None
-            ),
-            c128a_decode_topk_lens=(
-                torch.tensor([2, 2], dtype=torch.int32)
-                if compress_ratio == 128
-                else None
-            ),
-        )
-    )
-    gathered = []
-    captured = {}
-
-    def fake_gather(out, cache, **kwargs):
-        out.zero_()
-        gathered.append((cache, kwargs))
-
-    def fake_combine(local_topk, *args, out, **kwargs):
-        captured["local_topk"] = local_topk.clone()
-        indices, lengths = out
-        indices.fill_(-1)
-        lengths.fill_(1)
-        return indices, lengths
-
-    def fake_fill_c128(out, lengths):
-        indices = torch.arange(out.shape[1], dtype=out.dtype)
-        out.copy_(torch.where(indices < lengths[:, None], indices, -1))
-
-    def fake_sparse_fwd(**kwargs):
-        captured["sparse"] = kwargs
-        kwargs["out"].zero_()
-
-    monkeypatch.setattr(
-        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
-    )
-    monkeypatch.setattr(
-        flashmla_module, "current_workspace_manager", lambda: _WorkspaceManager()
-    )
-    monkeypatch.setattr(flashmla_module, "dequantize_and_gather_k_cache", fake_gather)
-    monkeypatch.setattr(flashmla_module, "combine_topk_swa_indices", fake_combine)
-    monkeypatch.setattr(flashmla_module, "fill_c128_topk", fake_fill_c128)
-    monkeypatch.setattr(flashmla_module, "flash_mla_sparse_fwd", fake_sparse_fwd)
-    monkeypatch.setattr(
-        flashmla_module,
-        "flash_mla_with_kvcache",
-        lambda **kwargs: pytest.fail("paged decode kernel must not run"),
-    )
-
-    attention._forward_decode(
-        q=q,
-        kv_cache=compressed_cache,
-        swa_metadata=swa_metadata,
-        attn_metadata=attn_metadata,
-        swa_only=compress_ratio == 1,
-        output=output,
-    )
-
-    assert len(gathered) == (1 if compress_ratio == 1 else 2)
-    assert captured["sparse"]["q"] is q
-    assert captured["sparse"]["out"] is output
-    if compress_ratio == 128:
-        expected = torch.full((128,), -1, dtype=torch.int32)
-        expected[:2] = torch.arange(2, dtype=torch.int32)
-        torch.testing.assert_close(captured["local_topk"][0], expected, rtol=0, atol=0)
-    elif compress_ratio == 4:
-        assert attention.topk_indices_buffer is not None
-        torch.testing.assert_close(
-            captured["local_topk"],
-            attention.topk_indices_buffer[:2],
-            rtol=0,
-            atol=0,
-        )
-
-
-def test_decode_paged_remains_default(monkeypatch: pytest.MonkeyPatch):
-    attention = _attention(1)
-    swa_metadata = _swa_metadata()
-    swa_metadata.tile_sched_swaonly = object()
-    q = torch.zeros((2, 2, 8), dtype=torch.bfloat16)
-    output = torch.empty_like(q)
-    captured = {}
-
-    def fake_paged(**kwargs):
-        captured.update(kwargs)
-        return kwargs["out"], None
-
-    monkeypatch.setattr(
-        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "paged", raising=False
-    )
-    monkeypatch.setattr(flashmla_module, "flash_mla_with_kvcache", fake_paged)
-    monkeypatch.setattr(
-        flashmla_module,
-        "flash_mla_sparse_fwd",
-        lambda **kwargs: pytest.fail("sparse decode kernel must not run"),
-    )
-
-    attention._forward_decode(
-        q=q,
-        kv_cache=None,
-        swa_metadata=swa_metadata,
-        attn_metadata=None,
-        swa_only=True,
-        output=output,
-    )
-
-    assert captured["tile_scheduler_metadata"] is swa_metadata.tile_sched_swaonly
-    assert captured["out"].shape == (2, 1, 2, 8)
-
-
-def test_decode_sparse_fails_closed_without_scheduler_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    attention = _attention(1)
-    swa_metadata = _swa_metadata()
-    swa_metadata.seq_lens_cpu = None
-    monkeypatch.setattr(
-        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
-    )
-
-    with pytest.raises(RuntimeError, match="finalized scheduler metadata"):
-        attention._forward_decode(
-            q=torch.zeros((2, 2, 8), dtype=torch.bfloat16),
-            kv_cache=None,
-            swa_metadata=swa_metadata,
-            attn_metadata=None,
-            swa_only=True,
-            output=torch.empty((2, 2, 8), dtype=torch.bfloat16),
-        )
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [0, 128, 129, 512])
 @pytest.mark.usefixtures("batch_invariant_kernel")
@@ -1484,6 +1296,7 @@ def test_fused_c4_decode_indices_match_existing_pipeline(
     top_k: int,
 ) -> None:
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(flashmla_module.envs, "VLLM_BATCH_INVARIANT", True)
 
     rows = 32
     window_size = 128
@@ -1551,6 +1364,7 @@ def test_fused_c128_decode_indices_match_existing_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(flashmla_module.envs, "VLLM_BATCH_INVARIANT", True)
 
     rows = 32
     top_k = 128

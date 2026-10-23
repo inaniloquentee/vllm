@@ -7,6 +7,7 @@ import random
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
@@ -348,6 +349,7 @@ def test_batch_invariant_masked_quant_matches_dense(
     the masked path (BatchedDeepGemmExperts) and the dense path
     (DeepGemmExperts), whatever batch it is in and wherever padding sits."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     set_random_seed(42)
     M = 512
     x = torch.randn(M, 2 * H, device=DEVICE, dtype=torch.bfloat16) * 3
