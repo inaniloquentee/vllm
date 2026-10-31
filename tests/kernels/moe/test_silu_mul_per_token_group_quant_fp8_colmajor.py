@@ -39,6 +39,28 @@ def test_bi_packed_quant_rejects_unsupported_padding_before_launch(monkeypatch):
         )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA native quantization")
+def test_bi_packed_quant_reuses_existing_triton(monkeypatch):
+    """BI dense packed quantization must not require the new native kernel."""
+    from vllm import envs
+    from vllm.model_executor.layers.quantization.utils import fp8_utils
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(
+        fp8_utils,
+        "fused_silu_mul_per_token_group_quant_fp8",
+        lambda *args, **kwargs: pytest.fail("BI dense path used the new kernel"),
+    )
+
+    input = torch.randn((128, 256), dtype=torch.bfloat16, device=DEVICE)
+    output, scales = silu_mul_quant_fp8_packed_triton(input)
+    torch.accelerator.synchronize()
+
+    assert output.shape == (128, 128)
+    assert scales.shape == (128, 1)
+
+
 def reference_quant(x: torch.Tensor, use_ue8m0: bool):
     """Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
