@@ -304,11 +304,13 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
 def _bi_top_k_per_row(dcp_world_size: int):
     """Without DCP, BI writes top-k in ascending index order, the order the BI
     sparse attention reduces in; the DCP merge needs score order."""
+    if dcp_world_size != 1:
+        raise NotImplementedError(
+            "DeepSelect batch-invariant sparse top-k does not support DCP"
+        )
     from vllm.model_executor.kernels import batch_invariant
 
-    if dcp_world_size == 1:
-        return batch_invariant.top_k_per_row_prefill_index_order
-    return batch_invariant.top_k_per_row_prefill
+    return batch_invariant.top_k_per_row_prefill_index_order
 
 
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:

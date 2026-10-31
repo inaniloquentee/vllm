@@ -6,23 +6,6 @@
 #include <optional>
 
 namespace vllm::batch_invariant {
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& row_starts,
-                           const torch::Tensor& row_ends,
-                           torch::Tensor& indices, int64_t num_rows,
-                           int64_t stride0, int64_t stride1, int64_t top_k);
-void top_k_per_row_prefill_index_order(const torch::Tensor& logits,
-                                       const torch::Tensor& row_starts,
-                                       const torch::Tensor& row_ends,
-                                       torch::Tensor& indices, int64_t num_rows,
-                                       int64_t stride0, int64_t stride1,
-                                       int64_t top_k);
-void top_k_per_row_prefill_reference(const torch::Tensor& logits,
-                                     const torch::Tensor& row_starts,
-                                     const torch::Tensor& row_ends,
-                                     torch::Tensor& indices, int64_t num_rows,
-                                     int64_t stride0, int64_t stride1,
-                                     int64_t top_k);
 void silu_mul_bf16(const torch::Tensor& input, torch::Tensor& output,
                    std::optional<double> clamp_limit);
 void hc_collapse(const torch::Tensor& hidden, const torch::Tensor& pre,
@@ -111,19 +94,6 @@ void fused_silu_mul_per_token_group_quant(
 
 TORCH_LIBRARY(vllm_batch_invariant, ops) {
   ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor row_starts, Tensor "
-      "row_ends, "
-      "Tensor(a!) indices, int num_rows, int stride0, int stride1, int top_k) "
-      "-> ()");
-  ops.def(
-      "top_k_per_row_prefill_index_order(Tensor logits, Tensor row_starts, "
-      "Tensor row_ends, Tensor(a!) indices, int num_rows, int stride0, "
-      "int stride1, int top_k) -> ()");
-  ops.def(
-      "top_k_per_row_prefill_reference(Tensor logits, Tensor row_starts, "
-      "Tensor row_ends, Tensor(a!) indices, int num_rows, int stride0, "
-      "int stride1, int top_k) -> ()");
-  ops.def(
       "silu_mul_bf16(Tensor input, Tensor(a!) output, float? clamp_limit) -> "
       "()");
   ops.def("hc_collapse(Tensor hidden, Tensor pre, Tensor(a!) output) -> ()");
@@ -190,12 +160,6 @@ TORCH_LIBRARY(vllm_batch_invariant, ops) {
 }
 
 TORCH_LIBRARY_IMPL(vllm_batch_invariant, CUDA, ops) {
-  ops.impl("top_k_per_row_prefill",
-           &vllm::batch_invariant::top_k_per_row_prefill);
-  ops.impl("top_k_per_row_prefill_index_order",
-           &vllm::batch_invariant::top_k_per_row_prefill_index_order);
-  ops.impl("top_k_per_row_prefill_reference",
-           &vllm::batch_invariant::top_k_per_row_prefill_reference);
   ops.impl("silu_mul_bf16", &vllm::batch_invariant::silu_mul_bf16);
   ops.impl("hc_collapse", &vllm::batch_invariant::hc_collapse);
   ops.impl("sparse_metadata", &vllm::batch_invariant::sparse_metadata);

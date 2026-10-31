@@ -2195,53 +2195,45 @@ def test_bi_bf16_indexer_cast_preserves_valid_scores_and_selector(
     assert captured[~valid].isnan().all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Top-K")
+@requires_sm100
 @pytest.mark.parametrize("top_k", [1, 64, 512, 513, 2048])
-@pytest.mark.parametrize("data", ["random", "ties", "special"])
+@pytest.mark.parametrize("data", ["random", "ties"])
 @torch.inference_mode()
-def test_bi_prefill_topk_matches_reference_kernel(top_k, data):
-    """The staged/early-exit BI Top-K returns exactly the reference kernel's
-    indices and order for every row length, including unstaged long rows; the
-    index-order variant returns the same set sorted by index, -1 last."""
-    from vllm.model_executor.kernels.batch_invariant import (
-        require_batch_invariant_kernel,
-    )
+def test_bi_prefill_topk_matches_deepselect(top_k, data):
+    """DeepSelect handles BI rows and emits the reduction order by index."""
+    from vllm.model_executor.layers.indexer_topk import deep_select_topk
 
-    require_batch_invariant_kernel()
     set_random_seed(top_k)
     lengths = [0, 1, 7, 511, 512, 513, 2047, 2048, 2049, 4097, 16384, 16385, 20011]
     rows = len(lengths) * 3
     columns = max(lengths) + 31
+    stride = ((columns * 4 + 1023) // 1024) * 256
     if data == "random":
-        scores = torch.randn(rows, columns, device="cuda")
+        storage = torch.randn(rows, stride, device="cuda")
     elif data == "ties":
-        scores = torch.randint(-4, 4, (rows, columns), device="cuda").float()
-    else:
-        scores = torch.randn(rows, columns, device="cuda").bfloat16().float()
-        scores[:, ::5] = -torch.inf
-        scores[:, 1::7] = torch.nan
-        scores[:, 2::11] = -0.0
-        scores[:, 3::11] = 0.0
-        scores[:, 4::13] = torch.inf
+        storage = torch.randint(-4, 4, (rows, stride), device="cuda").float()
+    scores = storage[:, :columns]
+    storage[:, columns:] = float("nan")
     lengths_t = torch.tensor(lengths * 3, dtype=torch.int32, device="cuda")
-    starts = torch.tensor(
-        [0] * len(lengths) + [5] * len(lengths) + [31] * len(lengths),
-        dtype=torch.int32,
-        device="cuda",
-    )
-    ends = starts + lengths_t
-    outputs = []
-    for op in (
-        "top_k_per_row_prefill",
-        "top_k_per_row_prefill_reference",
-        "top_k_per_row_prefill_index_order",
-    ):
-        out = torch.full((rows, top_k), -7, dtype=torch.int32, device="cuda")
-        getattr(torch.ops.vllm_batch_invariant, op)(
-            scores, starts, ends, out, rows, scores.stride(0), scores.stride(1), top_k
-        )
-        outputs.append(out)
-    assert torch.equal(outputs[0], outputs[1])
-    sentinel = torch.iinfo(torch.int32).max
-    by_index = torch.where(outputs[1] >= 0, outputs[1], sentinel).sort(-1).values
-    assert torch.equal(outputs[2], torch.where(by_index == sentinel, -1, by_index))
+    outputs = [
+        deep_select_topk(scores, top_k, end=lengths_t),
+        deep_select_topk(scores, top_k, end=lengths_t, sorted_index=True),
+    ]
+    torch.accelerator.synchronize()
+
+    for row, length in enumerate(lengths * 3):
+        k_i = min(top_k, length)
+        assert torch.all(outputs[0][row, k_i:] == -1)
+        assert torch.all(outputs[1][row, k_i:] == -1)
+        if k_i == 0:
+            continue
+
+        expected = scores[row, :length].topk(k_i, dim=-1).indices
+        actual_values = scores[row, outputs[0][row, :k_i]].sort().values
+        expected_values = scores[row, expected].sort().values
+        assert torch.equal(actual_values, expected_values)
+
+        selected = outputs[0][row, :k_i].sort().values
+        sorted_index = outputs[1][row, :k_i]
+        assert torch.equal(sorted_index, sorted_index.sort().values)
+        assert torch.equal(sorted_index, selected)

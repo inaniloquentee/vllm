@@ -75,6 +75,7 @@ def deep_select_topk(
     end: torch.Tensor | None = None,
     output_idx: torch.Tensor | None = None,
     indices_dtype: torch.dtype = torch.int32,
+    sorted_index: bool = False,
 ) -> torch.Tensor:
     """Select the top-k indices per row of `input` with DeepSelect.
 
@@ -88,6 +89,8 @@ def deep_select_topk(
         output_idx: Optional preallocated (num_rows, topk) output tensor whose
             stride(0) is 32B-aligned (e.g. a slice of a wider buffer).
         indices_dtype: Output dtype when `output_idx` is not provided.
+        sorted_index: Return valid indices in ascending order with -1 padding
+            after the valid region.
 
     Returns:
         The (num_rows, topk) indices tensor.
@@ -114,7 +117,7 @@ def deep_select_topk(
         None,  # begin is not supported
         end,
         False,  # sorted_value
-        False,  # sorted_index
+        sorted_index,
         None,  # output_value
         output_idx,
         None,  # output_idx_offset

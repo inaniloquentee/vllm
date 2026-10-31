@@ -39,8 +39,6 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
     try:
         torch.ops.load_library(str(library))
         for name in (
-            "top_k_per_row_prefill",
-            "top_k_per_row_prefill_index_order",
             "silu_mul_bf16",
             "hc_collapse",
             "sparse_metadata",
@@ -107,9 +105,10 @@ def top_k_per_row_prefill(
     stride1: int,
     topk_tokens: int,
 ) -> None:
-    """Select by descending score/local index with one fixed per-row algorithm."""
-    require_batch_invariant_kernel()
-    torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+    """Run the existing vLLM selector for non-BI callers."""
+    from vllm import _custom_ops as ops
+
+    ops.top_k_per_row_prefill(
         logits,
         cu_seqlen_ks,
         cu_seqlen_ke,
@@ -133,42 +132,19 @@ def top_k_per_row_prefill_index_order(
     *,
     zero_starts: bool = False,
 ) -> None:
-    """Select like top_k_per_row_prefill, then write the selected local indices
-    in ascending order with -1 padding last.
-
-    zero_starts promises every row starts at column zero; then
-    VLLM_BI_INDEXER_DEEPSELECT selects with DeepSelect instead."""
-    from vllm import envs
-
-    if zero_starts and envs.VLLM_BI_INDEXER_DEEPSELECT:
-        import vllm._deepselect_C  # noqa: F401
-
-        torch.ops.deep_select.topk(
-            logits[:num_rows],
-            topk_tokens,
-            None,  # begin: rows start at column zero
-            cu_seqlen_ke[:num_rows].contiguous(),
-            False,  # sorted_value
-            True,  # sorted_index: ascending, -1 padding last
-            None,
-            raw_topk_indices[:num_rows],
-            None,
-            -1,
-            float("-inf"),
-            False,  # return_value
-            False,  # abort_when_nan_found
+    """Select zero-based rows with DeepSelect in ascending index order."""
+    if not zero_starts:
+        raise NotImplementedError(
+            "DeepSelect batch-invariant top-k requires zero-based rows"
         )
-        return
-    require_batch_invariant_kernel()
-    torch.ops.vllm_batch_invariant.top_k_per_row_prefill_index_order(
-        logits,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        raw_topk_indices,
-        num_rows,
-        stride0,
-        stride1,
+    from vllm.model_executor.layers.indexer_topk import deep_select_topk
+
+    deep_select_topk(
+        logits[:num_rows],
         topk_tokens,
+        end=cu_seqlen_ke[:num_rows].contiguous(),
+        output_idx=raw_topk_indices[:num_rows],
+        sorted_index=True,
     )
 
 
