@@ -269,6 +269,7 @@ def silu_mul_quant_fp8_packed_triton(
     *,
     expert_ends: torch.Tensor | None = None,
     expert_alignment: int = 0,
+    _force_existing_triton: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse activation and FP8 quantization, optionally skipping expert padding.
 
@@ -279,20 +280,24 @@ def silu_mul_quant_fp8_packed_triton(
     Without ``expert_ends``, the original dense launch configuration is used
     and the metadata loads are compiled out.
     """
-    if envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT and not _force_existing_triton:
         if expert_ends is not None:
             raise NotImplementedError(
                 "BI packed quantization does not support expert padding metadata"
             )
         if alpha != 1.0 or beta != 0.0:
             raise ValueError("The BI quantization kernel requires plain SwiGLU")
-        return fused_silu_mul_per_token_group_quant_fp8(
+        # Re-enter the existing Triton implementation with the BI dispatch
+        # guard bypassed.  Its dense launch is already deterministic and
+        # writes the same packed UE8M0 layout used by DeepGEMM.
+        return silu_mul_quant_fp8_packed_triton(
             input,
             output_q=output_q,
             group_size=group_size,
-            use_ue8m0=True,
             clamp_limit=clamp_limit,
-            masked_m=None,
+            expert_ends=None,
+            expert_alignment=0,
+            _force_existing_triton=True,
         )
 
     assert input.dim() == 2
