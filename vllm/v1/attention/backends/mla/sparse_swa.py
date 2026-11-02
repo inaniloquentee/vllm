@@ -6,6 +6,7 @@ from typing import Any, ClassVar, cast
 import torch
 from transformers import DeepseekV4Config
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
@@ -209,6 +210,8 @@ class DeepseekSparseSWAMetadata:
         None  # [num_prefill_tokens, 1, prefill_index_width]
     )
     prefill_swa_lens: torch.Tensor | None = None  # [num_prefill_tokens]
+    bi_swa_indices: torch.Tensor | None = None  # [num_tokens, 1, window]
+    bi_swa_lens: torch.Tensor | None = None  # [num_tokens]
     # In-image bidirectional visibility (vision variant): per-token counts of
     # extra visible tokens to the left/right inside an image span. Indexed by
     # absolute (decode-first) token position; only prefill rows are written.
@@ -450,6 +453,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     - Chunked prefill (aligns with the indexer's chunking)
     """
 
+    BI_CONTIGUOUS_SWA: ClassVar[bool] = False
     reorder_batch_threshold: int | None = None
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     supports_draft_decode_metadata_update = True
@@ -535,6 +539,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self._bi_contiguous_swa = self.BI_CONTIGUOUS_SWA and envs.VLLM_BATCH_INVARIANT
+        if self._bi_contiguous_swa:
+            assert self.max_image_tokens == 0
+            self.decode_swa_indices = self.prefill_swa_indices
+            self.decode_swa_lens = self.prefill_swa_lens
         # In-image visibility side buffers (vision variant only). The span
         # CSR is uploaded per step from mm_req_doc_ranges; span capacity is
         # bounded by max_tokens since each span holds at least one token.
@@ -711,17 +720,22 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Prefill SWA indices live in paged coordinates. `token_offset` lets
         # the kernel read is_valid_token / token_to_req_indices at absolute
         # prefill positions while writing output starting at index 0.
+        prefill_start = num_decode_tokens if self._bi_contiguous_swa else 0
+        prefill_indices = self.prefill_swa_indices[
+            prefill_start : prefill_start + num_prefill_tokens
+        ]
+        prefill_lens = self.prefill_swa_lens[
+            prefill_start : prefill_start + num_prefill_tokens
+        ]
         if num_prefill_tokens > 0:
             has_image = prefill_left_visible is not None
-            prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]
-            prefill_swa_lens = self.prefill_swa_lens[:num_prefill_tokens]
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
-                prefill_swa_indices,
-                prefill_swa_lens,
+                prefill_indices,
+                prefill_lens,
                 self.window_size,
                 self.prefill_index_width,
-                prefill_left_visible if has_image else prefill_swa_lens,
-                prefill_right_visible if has_image else prefill_swa_lens,
+                prefill_left_visible if has_image else prefill_lens,
+                prefill_right_visible if has_image else prefill_lens,
                 query_start_loc,
                 seq_lens,
                 token_to_req_indices,
@@ -762,14 +776,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
             decode_swa_width=decode_swa_width,
-            prefill_swa_indices=(
-                self.prefill_swa_indices[:num_prefill_tokens]
-                if num_prefill_tokens > 0
+            prefill_swa_indices=prefill_indices if num_prefill_tokens > 0 else None,
+            prefill_swa_lens=prefill_lens if num_prefill_tokens > 0 else None,
+            bi_swa_indices=(
+                self.prefill_swa_indices[: num_decode_tokens + num_prefill_tokens]
+                if self._bi_contiguous_swa and not non_causal
                 else None
             ),
-            prefill_swa_lens=(
-                self.prefill_swa_lens[:num_prefill_tokens]
-                if num_prefill_tokens > 0
+            bi_swa_lens=(
+                self.prefill_swa_lens[: num_decode_tokens + num_prefill_tokens]
+                if self._bi_contiguous_swa and not non_causal
                 else None
             ),
             prefill_left_visible=prefill_left_visible,
