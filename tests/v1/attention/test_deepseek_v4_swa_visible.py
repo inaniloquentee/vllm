@@ -811,6 +811,13 @@ def test_v41_compressed_flashmla_bi_capability(monkeypatch, sm100):
     assert not sparse_mla.FlashMLAMegaAttnBackend.supports_batch_invariance()
 
 
+def test_v41_swa_block_stride_is_32_byte_aligned():
+    from vllm.models.deepseek_v41.attention import v41_swa_block_stride_alignment
+
+    assert v41_swa_block_stride_alignment(528, 528) == 1056
+    assert v41_swa_block_stride_alignment(528, 288) == 3168
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("compress_ratio", [0, 1])
 def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_ratio):
