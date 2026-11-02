@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
     mhc_post_tilelang,
@@ -194,6 +195,22 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
+def hc_stream_mean(streams: torch.Tensor) -> torch.Tensor:
+    if (
+        not envs.VLLM_BATCH_INVARIANT
+        or not current_platform.is_cuda()
+        or streams.dtype != torch.bfloat16
+    ):
+        return streams.mean(dim=1)
+    weights = torch.full(
+        streams.shape[:2],
+        1.0 / streams.shape[1],
+        dtype=torch.float32,
+        device=streams.device,
+    )
+    return hc_collapse_triton(streams, weights)
+
+
 def mhc_shifted_post_pre(
     x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,
@@ -264,7 +281,7 @@ def mhc_shifted_post_pre(
             assert isinstance(x, torch.Tensor)
             residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         aux = (
-            residual.mean(dim=1)
+            hc_stream_mean(residual)
             if capture_aux
             else residual.new_empty(0, residual.shape[-1])
         )
