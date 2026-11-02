@@ -181,6 +181,16 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and not context.is_padding.any()
 
 
+def test_replay_batch_keeps_exact_dependency_rows(state):
+    state.decoder_replay_layers.kept_rows = 255
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    assert replay.rows.tolist() == [0, *range(301 - 255, 301), *range(301, 401)]
+    assert build.batch.query_start_loc.tolist() == [0, 1, 256, 356]
+    assert build.replay_start.tolist() == [0, 300 - 255, 0]
+
+
 def test_replay_context_restores_tp_routing_rows(state):
     """Capture uses the compact replay batch's size, not the outer batch's."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)

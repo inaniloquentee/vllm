@@ -20,6 +20,7 @@ from vllm.forward_context import (
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
+    exact_replay_rows,
 )
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
@@ -34,6 +35,11 @@ HC, HIDDEN = 2, 3
 # decode (1 token), trimmed prefill (300 of 300), untrimmed prefill (100 of 300)
 WINDOW = 128
 REPLAY_ROWS = [0, *range(301 - WINDOW, 301), *range(301, 401)]
+
+
+def test_exact_replay_rows_cover_all_sliding_window_dependencies():
+    assert exact_replay_rows(128, 0) == 128
+    assert exact_replay_rows(128, 19) == 2541
 
 
 def _context(metadata):
