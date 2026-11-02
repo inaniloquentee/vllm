@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
@@ -28,6 +29,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.attention.ops.flashmla import (
+    FlashMLASchedMeta,
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
@@ -177,6 +179,17 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         # Split prefill and decode
         num_decode_tokens = swa_metadata.num_decode_tokens
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and swa_metadata.decode_swa_width == self.window_size
+        ):
+            num_tokens = num_decode_tokens + swa_metadata.num_prefill_tokens
+            self._forward_bi(
+                q[:num_tokens], self_kv_cache, flashmla_metadata,
+                swa_metadata, output[:num_tokens],
+            )
+            return
+
         if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
@@ -278,6 +291,61 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+
+    def _forward_bi(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        output: torch.Tensor,
+    ) -> None:
+        num_tokens = q.shape[0]
+        if not num_tokens:
+            return
+        assert swa_metadata.bi_swa_indices is not None
+        assert swa_metadata.bi_swa_lens is not None
+        swa_only = self.compress_ratio == 0
+        extra_cache = extra_indices = extra_lens = None
+        if not swa_only:
+            assert attn_metadata is not None and compressed_k_cache is not None
+            assert self.topk_indices_buffer is not None
+            assert swa_metadata.token_to_req_indices is not None
+            assert swa_metadata.is_valid_token is not None
+            extra_indices, extra_lens = compute_global_topk_indices_and_lens(
+                self.topk_indices_buffer[:num_tokens],
+                swa_metadata.token_to_req_indices,
+                attn_metadata.block_table,
+                attn_metadata.block_size // self.compress_ratio,
+                swa_metadata.is_valid_token[:num_tokens],
+            )
+            extra_cache = compressed_k_cache.unsqueeze(-2)
+        swa_cache = self.swa_cache_layer.kv_cache.unsqueeze(-2)
+        for start in range(0, num_tokens, 65535):
+            end = min(start + 65535, num_tokens)
+            flash_mla_with_kvcache(
+                q=q[start:end].unsqueeze(1),
+                k_cache=swa_cache,
+                block_table=None,
+                head_dim_v=512,
+                tile_scheduler_metadata=FlashMLASchedMeta(),
+                cache_seqlens=None,
+                is_fp8_kvcache=True,
+                indices=swa_metadata.bi_swa_indices[start:end],
+                topk_length=swa_metadata.bi_swa_lens[start:end],
+                softmax_scale=self.scale,
+                attn_sink=self.attn_sink,
+                extra_k_cache=extra_cache,
+                extra_indices_in_kvcache=(
+                    extra_indices[start:end].unsqueeze(1)
+                    if extra_indices is not None else None
+                ),
+                extra_topk_length=(
+                    extra_lens[start:end] if extra_lens is not None else None
+                ),
+                out=output[start:end].unsqueeze(1),
+                enable_batch_invariant=True,
+            )
 
     def _forward_prefill(
         self,

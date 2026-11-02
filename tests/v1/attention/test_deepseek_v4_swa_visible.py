@@ -799,7 +799,8 @@ def test_v41_bi_flashmla_reuses_contiguous_swa_metadata(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch):
+@pytest.mark.parametrize("compress_ratio", [0, 1])
+def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_ratio):
     from vllm.models.deepseek_v41.nvidia import flashmla
 
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
@@ -809,11 +810,12 @@ def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch):
     md = build_metadata(builder, [16, 12], [1, 12], None)
     cache = torch.empty((2, BLOCK_SIZE, 528), device="cuda", dtype=torch.uint8)
     layer = SimpleNamespace(
-        compress_ratio=0,
+        compress_ratio=compress_ratio,
         window_size=WINDOW,
         swa_cache_layer=SimpleNamespace(kv_cache=cache),
         scale=1.0,
         attn_sink=torch.zeros(64, device="cuda"),
+        topk_indices_buffer=torch.zeros((13, 2), device="cuda", dtype=torch.int32),
     )
     q = torch.empty((13, 64, 512), device="cuda", dtype=torch.bfloat16)
     calls = []
@@ -822,13 +824,21 @@ def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch):
         "flash_mla_with_kvcache",
         lambda **kw: calls.append(kw),
     )
+    compressed = torch.empty((2, BLOCK_SIZE, 288), device="cuda", dtype=torch.uint8)
+    attn_md = SimpleNamespace(block_table=md.block_table, block_size=BLOCK_SIZE)
     flashmla.DeepseekV4FlashMLAAttention._forward_bi(
-        layer, q, None, None, md, torch.empty_like(q)
+        layer, q, compressed if compress_ratio else None,
+        attn_md if compress_ratio else None, md, torch.empty_like(q),
     )
     assert len(calls) == 1
     assert calls[0]["enable_batch_invariant"] is True
     assert torch.equal(calls[0]["indices"][:, 0], md.bi_swa_indices[:, 0])
     assert torch.equal(calls[0]["topk_length"], md.bi_swa_lens)
+    if compress_ratio:
+        assert calls[0]["extra_indices_in_kvcache"].shape == (13, 1, 2)
+        assert torch.equal(calls[0]["extra_topk_length"], torch.full((13,), 2, device="cuda"))
+    else:
+        assert calls[0]["extra_k_cache"] is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
