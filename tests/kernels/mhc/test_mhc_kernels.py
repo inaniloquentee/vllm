@@ -115,6 +115,26 @@ def test_deepseek_v41_bi_mhc_avoids_batch_size_routes(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("hc_mult", [1, 4, 8])
+def test_deepseek_v41_bi_hc_stream_mean_is_row_invariant(monkeypatch, hc_mult):
+    import vllm.envs as envs
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_stream_mean
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    torch.manual_seed(7)
+    streams = torch.randn((17, hc_mult, 513), device="cuda", dtype=torch.bfloat16)
+    full = hc_stream_mean(streams)
+    torch.testing.assert_close(
+        full, streams.float().mean(dim=1).to(torch.bfloat16), atol=0, rtol=0
+    )
+    for row in range(17):
+        torch.testing.assert_close(
+            hc_stream_mean(streams[row : row + 1]), full[row : row + 1],
+            atol=0, rtol=0,
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",
     [
