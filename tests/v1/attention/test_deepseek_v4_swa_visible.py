@@ -12,6 +12,7 @@ at ``max(pos - (window - 1) - max(left - (window - 1), 0), 0)`` and ends at
 """
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -795,6 +796,39 @@ def test_v41_bi_flashmla_reuses_contiguous_swa_metadata(monkeypatch):
     assert torch.equal(md.bi_swa_indices[:1], md.decode_swa_indices)
     assert torch.equal(md.bi_swa_indices[1:], md.prefill_swa_indices)
     assert torch.equal(md.bi_swa_lens[1:], md.prefill_swa_lens)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch):
+    from vllm.models.deepseek_v41.nvidia import flashmla
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    builder = make_builder(
+        vision=False, builder_cls=flashmla.DeepseekSparseSWAFlashMLAMetadataBuilder
+    )
+    md = build_metadata(builder, [16, 12], [1, 12], None)
+    cache = torch.empty((2, BLOCK_SIZE, 528), device="cuda", dtype=torch.uint8)
+    layer = SimpleNamespace(
+        compress_ratio=0,
+        window_size=WINDOW,
+        swa_cache_layer=SimpleNamespace(kv_cache=cache),
+        scale=1.0,
+        attn_sink=torch.zeros(64, device="cuda"),
+    )
+    q = torch.empty((13, 64, 512), device="cuda", dtype=torch.bfloat16)
+    calls = []
+    monkeypatch.setattr(
+        flashmla,
+        "flash_mla_with_kvcache",
+        lambda **kw: calls.append(kw),
+    )
+    flashmla.DeepseekV4FlashMLAAttention._forward_bi(
+        layer, q, None, None, md, torch.empty_like(q)
+    )
+    assert len(calls) == 1
+    assert calls[0]["enable_batch_invariant"] is True
+    assert torch.equal(calls[0]["indices"][:, 0], md.bi_swa_indices[:, 0])
+    assert torch.equal(calls[0]["topk_length"], md.bi_swa_lens)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
