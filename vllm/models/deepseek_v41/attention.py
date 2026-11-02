@@ -68,6 +68,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.decoder_replay_layers import exact_replay_rows
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
@@ -643,6 +644,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     "sliding-window cache takes part in prefix caching instead."
                 )
                 swa_bounded_replay = False
+        replay_tokens = (
+            exact_replay_rows(self.window_size, config.num_hidden_layers)
+            if swa_bounded_replay and envs.VLLM_BATCH_INVARIANT
+            else None
+        )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -661,6 +667,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 else None
             ),
             bounded_replay=swa_bounded_replay,
+            replay_tokens=replay_tokens,
         )
 
         # The attention layer itself was already registered with the

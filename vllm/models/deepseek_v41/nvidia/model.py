@@ -84,7 +84,10 @@ from vllm.models.deepseek_v4.nvidia.model import (
     prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
-from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.models.deepseek_v41.decoder_replay_layers import (
+    DecoderReplayLayers,
+    exact_replay_rows,
+)
 from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     DeepseekV4MegaAttnAttention,
 )
@@ -889,6 +892,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
                 lambda: any(i < cut for i in self.aux_hidden_state_layers),
+                kept_rows=(
+                    exact_replay_rows(
+                        config.sliding_window, self.end_layer - cut - 1
+                    )
+                    if envs.VLLM_BATCH_INVARIANT
+                    else None
+                ),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "

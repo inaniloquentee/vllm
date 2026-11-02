@@ -271,10 +271,12 @@ class DeepseekV41ModelState(DefaultModelState):
             and not vllm_config.model_config.enable_prompt_embeds
         ):
             threshold = compilation_config.decoder_replay_trim_threshold
-            if threshold <= layers.window:
+            if layers.kept_rows > layers.window:
+                threshold = max(threshold, layers.kept_rows + 1)
+            if threshold <= layers.kept_rows:
                 raise ValueError(
-                    "decoder_replay_trim_threshold must exceed the replay window "
-                    f"of {layers.window} tokens: smaller graphs have nothing to trim"
+                    "decoder_replay_trim_threshold must exceed the replay rows "
+                    f"of {layers.kept_rows} tokens: smaller graphs have nothing to trim"
                 )
             self.replay_cudagraphs = DecoderReplayCudaGraphManager(
                 vllm_config, device, layers
@@ -479,7 +481,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._kept_slot_mappings,
             self._kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.window,
+            self.decoder_replay_layers.kept_rows,
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
             grid=(1,),
@@ -522,11 +524,13 @@ class DeepseekV41ModelState(DefaultModelState):
             # Every trimmed request spans all ranks, so each rank can derive
             # the same global kept count from its local request segments.
             global_dropped_lens = np.where(
-                keeps_rows, 0, np.maximum(pcp.global_query_lens_np - layers.window, 0)
+                keeps_rows,
+                0,
+                np.maximum(pcp.global_query_lens_np - layers.kept_rows, 0),
             )
             kv_start = np.where(
                 global_dropped_lens > 0,
-                pcp.global_seq_lens_cpu_upper_bound_np - layers.window,
+                pcp.global_seq_lens_cpu_upper_bound_np - layers.kept_rows,
                 0,
             )
             kept_lens = np.clip(seq_lens - kv_start, 0, query_lens)
@@ -538,7 +542,7 @@ class DeepseekV41ModelState(DefaultModelState):
             )
         else:
             kept_lens = np.where(
-                keeps_rows, query_lens, np.minimum(query_lens, layers.window)
+                keeps_rows, query_lens, np.minimum(query_lens, layers.kept_rows)
             )
             # Idle DP batches have stale request slots and no context; keep one row.
             is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
@@ -713,7 +717,7 @@ class DeepseekV41ModelState(DefaultModelState):
             kept_slot_mappings,
             kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.window,  # type: ignore[union-attr]
+            self.decoder_replay_layers.kept_rows,  # type: ignore[union-attr]
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
         )

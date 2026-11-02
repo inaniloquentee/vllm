@@ -28,6 +28,10 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
+def exact_replay_rows(window: int, num_layers: int) -> int:
+    return window + num_layers * (window - 1)
+
+
 @dataclass
 class ReplayBatch:
     """One forward's replay batch; ``run_graph`` is set when it runs in a graph."""
@@ -58,8 +62,10 @@ class DecoderReplayLayers:
         metadata_prefixes: set[str],
         first_swa_prefix: str,
         has_early_aux: Callable[[], bool] = lambda: False,
+        kept_rows: int | None = None,
     ) -> None:
         self.window = window
+        self.kept_rows = window if kept_rows is None else kept_rows
         self.run_layers = run_layers
         self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
