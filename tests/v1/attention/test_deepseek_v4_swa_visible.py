@@ -18,6 +18,7 @@ import torch
 from transformers import DeepseekV4Config
 from typing_extensions import TypedDict
 
+import vllm.envs as envs
 from tests.v1.attention.utils import create_vllm_config
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
     build_flashinfer_mixed_sparse_indices,
@@ -774,6 +775,26 @@ def test_builder_replaying_group_builds_without_replay_start():
     md = build_metadata(builder, [40, 12], [24, 12], None)
     assert not md.replay_start.any()
     assert md.prefill_swa_lens[0].item() == WINDOW
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_bi_flashmla_reuses_contiguous_swa_metadata(monkeypatch):
+    from vllm.models.deepseek_v41.nvidia.flashmla import (
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
+    )
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    builder = make_builder(
+        vision=False, builder_cls=DeepseekSparseSWAFlashMLAMetadataBuilder
+    )
+    md = build_metadata(builder, [16, 12], [1, 12], None)
+    assert md.num_decode_tokens == 1 and md.num_prefill_tokens == 12
+    assert md.bi_swa_indices is not None and md.bi_swa_lens is not None
+    assert md.bi_swa_indices.shape == (13, 1, WINDOW)
+    assert md.bi_swa_indices.data_ptr() == md.decode_swa_indices.data_ptr()
+    assert torch.equal(md.bi_swa_indices[:1], md.decode_swa_indices)
+    assert torch.equal(md.bi_swa_indices[1:], md.prefill_swa_indices)
+    assert torch.equal(md.bi_swa_lens[1:], md.prefill_swa_lens)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
