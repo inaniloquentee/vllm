@@ -92,7 +92,9 @@ def test_deepseek_v41_bi_mhc_avoids_batch_size_routes(monkeypatch):
     from vllm.models.deepseek_v41.nvidia.ops import mhc
 
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(hidden_size=5120, hc_mult=4)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(hidden_size=5120, hc_mult=4)
+        ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=4, enable_expert_parallel=False, use_ubatching=False
         ),
@@ -103,7 +105,9 @@ def test_deepseek_v41_bi_mhc_avoids_batch_size_routes(monkeypatch):
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
-    monkeypatch.setattr(mhc.current_platform, "is_device_capability_family", lambda _: True)
+    monkeypatch.setattr(
+        mhc.current_platform, "is_device_capability_family", lambda _: True
+    )
     monkeypatch.setattr(mhc, "is_deep_gemm_supported", lambda: True)
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     assert not mhc.supports_mhc_overlap(config)
