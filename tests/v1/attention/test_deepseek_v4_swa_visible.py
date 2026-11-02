@@ -453,6 +453,31 @@ def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_combine_topk_swa_clears_reused_workspace_tail():
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+
+    device = "cuda"
+    indices = torch.full((1, 128), 777, dtype=torch.int32, device=device)
+    lens = torch.empty((1,), dtype=torch.int32, device=device)
+    combine_v41(
+        torch.tensor([[0, -1, -1, -1]], dtype=torch.int32, device=device),
+        torch.tensor([0, 1], dtype=torch.int32, device=device),
+        torch.tensor([1], dtype=torch.int32, device=device),
+        torch.tensor([1], dtype=torch.int32, device=device),
+        window_size=WINDOW,
+        compress_ratio=1,
+        topk=4,
+        M=16,
+        N=1,
+        out=(indices, lens),
+    )
+    assert lens.item() == 2
+    assert torch.all(indices[0, 2:] == -1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):
     """left_visible=None must reproduce the plain causal combined indices."""
