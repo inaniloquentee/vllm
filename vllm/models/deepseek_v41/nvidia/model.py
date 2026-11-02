@@ -893,9 +893,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].attn.swa_cache_layer.prefix,
                 lambda: any(i < cut for i in self.aux_hidden_state_layers),
                 kept_rows=(
-                    exact_replay_rows(
-                        config.sliding_window, self.end_layer - cut - 1
-                    )
+                    exact_replay_rows(config.sliding_window, self.end_layer - cut - 1)
                     if envs.VLLM_BATCH_INVARIANT
                     else None
                 ),
