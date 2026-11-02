@@ -77,6 +77,7 @@ from vllm.utils.multi_stream_utils import (
 )
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
@@ -1160,6 +1161,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 None,
                 index_weights,
             )
+            if envs.VLLM_BATCH_INVARIANT and not getattr(
+                self.indexer.indexer_op, "emits_bi_index_order", False
+            ):
+                metadata = get_forward_context().attn_metadata
+                if isinstance(metadata, dict):
+                    index_metadata = cast(
+                        DeepseekV32IndexerMetadata,
+                        metadata[self.indexer.k_cache.prefix],
+                    )
+                    tokens = (
+                        index_metadata.num_decode_tokens
+                        + index_metadata.num_prefill_tokens
+                    )
+                    assert self.topk_indices_buffer is not None
+                    _sort_valid_topk_indices_(self.topk_indices_buffer[:tokens])
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
@@ -1358,6 +1374,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert self.compressed_cache_prefix is not None
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
+
+
+def _sort_valid_topk_indices_(indices: torch.Tensor) -> None:
+    """Keep selected positions in the sparse attention reduction order."""
+    sentinel = torch.iinfo(indices.dtype).max
+    ordered = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
+    indices.copy_(torch.where(ordered == sentinel, -1, ordered))
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
