@@ -62,6 +62,10 @@ class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
     def supports_pcp(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_device_capability_family(100)
+
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
         return DeepseekSparseSWAFlashMLAMetadataBuilder

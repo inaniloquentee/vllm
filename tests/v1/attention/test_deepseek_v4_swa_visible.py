@@ -803,6 +803,9 @@ def test_v41_bi_flashmla_reuses_contiguous_swa_metadata(monkeypatch):
 def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_ratio):
     from vllm.models.deepseek_v41.nvidia import flashmla
 
+    assert flashmla.DeepseekSparseSWAFlashMLABackend.supports_batch_invariance() == (
+        flashmla.current_platform.is_device_capability_family(100)
+    )
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     builder = make_builder(
         vision=False, builder_cls=flashmla.DeepseekSparseSWAFlashMLAMetadataBuilder
