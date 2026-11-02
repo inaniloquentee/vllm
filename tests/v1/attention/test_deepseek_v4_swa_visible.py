@@ -851,6 +851,17 @@ def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_rat
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_bi_selected_positions_are_in_index_order():
+    from vllm.models.deepseek_v41.attention import _sort_valid_topk_indices_
+
+    indices = torch.tensor(
+        [[7, 2, -1, 5], [9, -1, 1, -1]], device="cuda", dtype=torch.int32
+    )
+    _sort_valid_topk_indices_(indices)
+    assert indices.cpu().tolist() == [[2, 5, 7, -1], [1, 9, -1, -1]]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         build_flashinfer_mixed_sparse_indices as build_v41,
