@@ -972,7 +972,6 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
-        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -1151,6 +1150,15 @@ class CombineTopkSwaIndicesKernel(
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
+            for tail_start in tl.static_range(
+                0, (TOP_K + WINDOW_SIZE + 127) // 128 * 128, 128
+            ):
+                tail = tail_start + tl.arange(0, 128)
+                tl.store(
+                    combined_indices_ptr + token_idx * combined_indices_stride + tail,
+                    -1,
+                    mask=tail >= combined_len,
+                )
 
     def dispatch(  # type: ignore[override]
         self,
