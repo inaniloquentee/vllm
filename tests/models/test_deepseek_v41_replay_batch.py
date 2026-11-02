@@ -507,7 +507,9 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = DecoderReplayLayers(
+        WINDOW, lambda *args: (), lambda *args: None, set(), "swa"
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
