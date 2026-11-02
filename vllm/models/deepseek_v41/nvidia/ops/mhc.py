@@ -11,11 +11,11 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
     mhc_post_tilelang,
 )
+from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
     UnfinalizedMoEOutput,
