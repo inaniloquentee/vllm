@@ -2156,6 +2156,23 @@ def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
     assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
 
+def test_merge_sliding_window_mla_spec_preserves_replay_budget():
+    spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.uint8,
+        sliding_window=128,
+        bounded_replay=True,
+        replay_tokens=512,
+    )
+    assert spec.prefix_replay_tokens == 512
+    assert replace(spec, bounded_replay=False).prefix_replay_tokens == 0
+    assert SlidingWindowMLASpec.merge([spec, spec]).prefix_replay_tokens == 512
+    with pytest.raises(AssertionError):
+        SlidingWindowMLASpec.merge([spec, replace(spec, replay_tokens=256)])
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
     block_size = 3
