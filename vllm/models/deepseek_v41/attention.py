@@ -1709,6 +1709,7 @@ class DeepseekV4Indexer(nn.Module):
             if (
                 indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
                 and not torch.cuda.is_current_stream_capturing()
+                and not envs.VLLM_BATCH_INVARIANT
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
