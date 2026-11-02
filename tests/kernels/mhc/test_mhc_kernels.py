@@ -87,6 +87,29 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 
+def test_deepseek_v41_bi_mhc_avoids_batch_size_routes(monkeypatch):
+    import vllm.envs as envs
+    from vllm.models.deepseek_v41.nvidia.ops import mhc
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(hidden_size=5120, hc_mult=4)),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4, enable_expert_parallel=False, use_ubatching=False
+        ),
+    )
+    group = SimpleNamespace(
+        device_communicator=SimpleNamespace(
+            ca_comm=SimpleNamespace(mnnvl_lamport_ag_multicast_ptr=1)
+        )
+    )
+    monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    monkeypatch.setattr(mhc.current_platform, "is_device_capability_family", lambda _: True)
+    monkeypatch.setattr(mhc, "is_deep_gemm_supported", lambda: True)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert not mhc.supports_mhc_overlap(config)
+    assert not mhc.supports_mhc_all_reduce(config)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",
