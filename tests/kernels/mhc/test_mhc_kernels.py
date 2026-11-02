@@ -129,8 +129,10 @@ def test_deepseek_v41_bi_hc_stream_mean_is_row_invariant(monkeypatch, hc_mult):
     )
     for row in range(17):
         torch.testing.assert_close(
-            hc_stream_mean(streams[row : row + 1]), full[row : row + 1],
-            atol=0, rtol=0,
+            hc_stream_mean(streams[row : row + 1]),
+            full[row : row + 1],
+            atol=0,
+            rtol=0,
         )
 
 
