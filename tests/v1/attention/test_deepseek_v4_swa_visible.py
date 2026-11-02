@@ -798,6 +798,19 @@ def test_v41_bi_flashmla_reuses_contiguous_swa_metadata(monkeypatch):
     assert torch.equal(md.bi_swa_lens[1:], md.prefill_swa_lens)
 
 
+@pytest.mark.parametrize("sm100", [False, True])
+def test_v41_compressed_flashmla_bi_capability(monkeypatch, sm100):
+    from vllm.models.deepseek_v41 import sparse_mla
+
+    monkeypatch.setattr(
+        sparse_mla.current_platform,
+        "is_device_capability_family",
+        lambda major: sm100 and major == 100,
+    )
+    assert sparse_mla.DeepseekV4FlashMLABackend.supports_batch_invariance() is sm100
+    assert not sparse_mla.FlashMLAMegaAttnBackend.supports_batch_invariance()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("compress_ratio", [0, 1])
 def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_ratio):
