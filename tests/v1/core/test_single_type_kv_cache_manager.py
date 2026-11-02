@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
     RSWASpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -884,6 +885,27 @@ def test_get_num_blocks_to_allocate():
         )
         == 15
     )
+
+
+def test_swa_prefix_hit_keeps_exact_replay_blocks():
+    spec = SlidingWindowMLASpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.uint8,
+        sliding_window=8,
+        bounded_replay=True,
+        replay_tokens=20,
+    )
+    pool = BlockPool(num_gpu_blocks=20, enable_caching=True, hash_block_size=4)
+    manager = get_sliding_window_manager(spec, pool)
+    assert manager.get_num_skipped_tokens(32) == 25
+    assert manager.get_num_blocks_to_allocate("hit", 36, [], 32, 0, 36) == 6
+    manager.add_local_computed_blocks("hit", [], 0, 32)
+    assert manager.req_to_blocks["hit"] == [pool.null_block] * 3
+    manager.allocate_external_computed_blocks("hit", 0, 32)
+    assert len(manager.req_to_blocks["hit"]) == 8
+    assert all(not block.is_null for block in manager.req_to_blocks["hit"][3:])
 
 
 def test_evictable_cached_blocks_not_double_allocated():
