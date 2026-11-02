@@ -862,6 +862,33 @@ def test_v41_bi_selected_positions_are_in_index_order():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_bi_short_context_uses_same_indexer_route(monkeypatch):
+    from vllm.models.deepseek_v41 import attention
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    metadata = SimpleNamespace(max_seq_len=2, num_decode_tokens=1, num_prefill_tokens=0)
+    monkeypatch.setattr(
+        attention,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"idx": metadata}),
+    )
+    marker = (object(), None, None)
+    indexer = SimpleNamespace(
+        k_cache=SimpleNamespace(prefix="idx"),
+        compress_ratio=1,
+        topk_tokens=4,
+        owns_k=False,
+        topk_indices_buffer=torch.zeros((1, 4), device="cuda", dtype=torch.int32),
+        forward_q=lambda *args: marker,
+    )
+    positions = torch.ones(1, device="cuda", dtype=torch.int64)
+    result = attention.DeepseekV4Indexer.forward(
+        indexer, positions, None, positions, positions, object()
+    )
+    assert result is marker
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         build_flashinfer_mixed_sparse_indices as build_v41,
