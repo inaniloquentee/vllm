@@ -185,8 +185,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         ):
             num_tokens = num_decode_tokens + swa_metadata.num_prefill_tokens
             self._forward_bi(
-                q[:num_tokens], self_kv_cache, flashmla_metadata,
-                swa_metadata, output[:num_tokens],
+                q[:num_tokens],
+                self_kv_cache,
+                flashmla_metadata,
+                swa_metadata,
+                output[:num_tokens],
             )
             return
 
@@ -338,7 +341,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 extra_k_cache=extra_cache,
                 extra_indices_in_kvcache=(
                     extra_indices[start:end].unsqueeze(1)
-                    if extra_indices is not None else None
+                    if extra_indices is not None
+                    else None
                 ),
                 extra_topk_length=(
                     extra_lens[start:end] if extra_lens is not None else None

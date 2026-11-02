@@ -827,8 +827,12 @@ def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_rat
     compressed = torch.empty((2, BLOCK_SIZE, 288), device="cuda", dtype=torch.uint8)
     attn_md = SimpleNamespace(block_table=md.block_table, block_size=BLOCK_SIZE)
     flashmla.DeepseekV4FlashMLAAttention._forward_bi(
-        layer, q, compressed if compress_ratio else None,
-        attn_md if compress_ratio else None, md, torch.empty_like(q),
+        layer,
+        q,
+        compressed if compress_ratio else None,
+        attn_md if compress_ratio else None,
+        md,
+        torch.empty_like(q),
     )
     assert len(calls) == 1
     assert calls[0]["enable_batch_invariant"] is True
@@ -836,7 +840,9 @@ def test_v41_bi_flashmla_consumes_shared_paged_indices(monkeypatch, compress_rat
     assert torch.equal(calls[0]["topk_length"], md.bi_swa_lens)
     if compress_ratio:
         assert calls[0]["extra_indices_in_kvcache"].shape == (13, 1, 2)
-        assert torch.equal(calls[0]["extra_topk_length"], torch.full((13,), 2, device="cuda"))
+        assert torch.equal(
+            calls[0]["extra_topk_length"], torch.full((13,), 2, device="cuda")
+        )
     else:
         assert calls[0]["extra_k_cache"] is None
 
