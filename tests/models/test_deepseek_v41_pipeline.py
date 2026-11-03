@@ -74,5 +74,5 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch, model_entry):
     assert engram_mask is mask
     torch.testing.assert_close(layer_hashes, hashes[:, 1])
     mhc_residual, mhc_pre_mix = mhc_pre_calls[0]
-    torch.testing.assert_close(mhc_residual, hidden + 10)
+    torch.testing.assert_close(mhc_residual, engram_residual + 10)
     assert mhc_pre_mix is pre_mix
