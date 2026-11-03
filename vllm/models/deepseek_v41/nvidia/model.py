@@ -528,6 +528,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         # for the first layer), the FFN uses this layer's attention pre-mix.
         if residual is None:
             assert isinstance(x, torch.Tensor)
+            if x.dim() == 2 and self.engram is not None and engram_hashes is not None:
+                x = hc_expand(x, self.hc_mult)
             if x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
