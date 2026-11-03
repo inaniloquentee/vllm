@@ -2515,8 +2515,11 @@ def test_batch_invariant_sparse_indexer_reuses_deep_select(monkeypatch) -> None:
     assert calls == [4]
 
 
+@pytest.mark.parametrize("row_stride_padding", [0, 8])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_batch_invariant_sparse_indexer_flashinfer_fallback(monkeypatch) -> None:
+def test_batch_invariant_sparse_indexer_flashinfer_fallback(
+    monkeypatch, row_stride_padding: int
+) -> None:
     from vllm import envs
     from vllm.model_executor.layers import sparse_attn_indexer
 
@@ -2526,7 +2529,9 @@ def test_batch_invariant_sparse_indexer_flashinfer_fallback(monkeypatch) -> None
         "is_device_capability_family",
         lambda _: False,
     )
-    logits = torch.ones((2, 1024), dtype=torch.float32, device="cuda")
+    logits = torch.ones(
+        (2, 1024 + row_stride_padding), dtype=torch.float32, device="cuda"
+    )[:, :1024]
     starts = torch.tensor([0, 17], dtype=torch.int32, device="cuda")
     ends = starts + 512
     indices = torch.empty((2, 64), dtype=torch.int32, device="cuda")

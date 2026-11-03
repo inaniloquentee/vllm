@@ -104,7 +104,7 @@ def _top_k_per_row_prefill(
 
             starts = row_starts[:num_rows]
             selected = top_k_ragged_transform(
-                logits[:num_rows],
+                logits[:num_rows].contiguous(),
                 torch.zeros_like(starts),
                 row_ends[:num_rows] - starts,
                 top_k,
