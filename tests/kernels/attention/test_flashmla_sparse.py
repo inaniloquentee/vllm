@@ -994,6 +994,7 @@ def test_fused_decode_indices_match_existing_pipeline(
     torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
     torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
 
+
 class _WorkspaceManager:
     def get_simultaneous(self, *specs):
         return tuple(torch.empty(shape, dtype=dtype) for shape, dtype in specs)
