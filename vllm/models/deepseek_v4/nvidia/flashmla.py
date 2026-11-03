@@ -9,6 +9,7 @@ from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
+    combine_c128_swa_decode,
     combine_topk_swa_indices,
     compute_gather_lens,
     compute_global_topk_indices_and_lens,
@@ -420,10 +421,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             envs.VLLM_BATCH_INVARIANT
             and not swa_only
             and self.compress_ratio == 128
-            and hasattr(
-                torch.ops._C,
-                "combine_c128_swa_decode",
-            )
         )
         use_fused_topk_decode = (
             envs.VLLM_BATCH_INVARIANT
@@ -473,7 +470,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
 
         if use_fused_c128_decode:
-            torch.ops._C.combine_c128_swa_decode(
+            combine_c128_swa_decode(
                 combined_indices_out,
                 combined_lens_out,
                 seq_lens,

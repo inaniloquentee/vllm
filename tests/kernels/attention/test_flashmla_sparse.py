@@ -868,7 +868,6 @@ def test_decode_sparse_reuses_prefill_kernel(
     fused_c128 = (
         batch_invariant
         and compress_ratio == 128
-        and hasattr(torch.ops._C, "combine_c128_swa_decode")
     )
     if fused_c128:
 
@@ -877,7 +876,7 @@ def test_decode_sparse_reuses_prefill_kernel(
             indices.fill_(-1)
             lengths.fill_(1)
 
-        monkeypatch.setattr(torch.ops._C, "combine_c128_swa_decode", fake_fused_c128)
+        monkeypatch.setattr(flashmla_module, "combine_c128_swa_decode", fake_fused_c128)
 
     monkeypatch.setattr(
         flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
