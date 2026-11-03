@@ -11,13 +11,16 @@ from vllm.platforms import current_platform
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.skip_global_cleanup
-def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
+@pytest.mark.parametrize("model_entry", [False, True])
+def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch, model_entry):
     model_module = import_module("vllm.models.deepseek_v41.nvidia.model")
 
     class StopAfterMhcPre(Exception):
         pass
 
-    hidden = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+    hidden = torch.arange(24, dtype=torch.float32, device="cuda").reshape(2, 4, 3)
+    if model_entry:
+        hidden = hidden[:, 0].contiguous()
     hashes = torch.arange(6).reshape(2, 3)
     mask = torch.tensor([True, False])
     pre_mix = torch.randn(2, 4)
@@ -38,7 +41,9 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
     layer = SimpleNamespace(
         mhc_stream=None,
         engram=Engram(),
+        hc_mult=4,
         hc_attn_fn=None,
+        hc_attn_fn_broadcast=object(),
         hc_attn_scale=None,
         hc_attn_base=None,
         rms_norm_eps=1e-6,
@@ -62,7 +67,10 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
 
     assert len(engram_calls) == len(mhc_pre_calls) == 1
     engram_residual, layer_hashes, engram_mask = engram_calls[0]
-    assert engram_residual is hidden
+    if model_entry:
+        torch.testing.assert_close(engram_residual, hidden[:, None].expand(-1, 4, -1))
+    else:
+        assert engram_residual is hidden
     assert engram_mask is mask
     torch.testing.assert_close(layer_hashes, hashes[:, 1])
     mhc_residual, mhc_pre_mix = mhc_pre_calls[0]
