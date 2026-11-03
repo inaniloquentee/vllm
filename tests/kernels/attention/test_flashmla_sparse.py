@@ -1034,10 +1034,14 @@ def _swa_metadata():
     )
 
 
-@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+@pytest.mark.parametrize(
+    "compress_ratio,batch_invariant",
+    [(1, False), (4, False), (128, False), (128, True)],
+)
 def test_decode_sparse_reuses_prefill_kernel(
     monkeypatch: pytest.MonkeyPatch,
     compress_ratio: int,
+    batch_invariant: bool,
 ):
     attention = _attention(compress_ratio)
     swa_metadata = _swa_metadata()
@@ -1088,8 +1092,10 @@ def test_decode_sparse_reuses_prefill_kernel(
         captured["sparse"] = kwargs
         kwargs["out"].zero_()
 
-    fused_c128 = compress_ratio == 128 and hasattr(
-        torch.ops._C, "combine_c128_swa_decode"
+    fused_c128 = (
+        batch_invariant
+        and compress_ratio == 128
+        and hasattr(torch.ops._C, "combine_c128_swa_decode")
     )
     if fused_c128:
 
@@ -1103,6 +1109,7 @@ def test_decode_sparse_reuses_prefill_kernel(
     monkeypatch.setattr(
         flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
     )
+    monkeypatch.setattr(flashmla_module.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
     monkeypatch.setattr(
         flashmla_module, "current_workspace_manager", lambda: _WorkspaceManager()
     )
