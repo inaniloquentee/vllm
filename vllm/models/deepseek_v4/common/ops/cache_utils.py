@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -806,6 +807,39 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
+def combine_c128_swa_decode(
+    combined_indices: torch.Tensor,
+    combined_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    is_valid: torch.Tensor,
+    M: int,
+    N: int,
+    top_k: int,
+    compress_ratio: int,
+    window_size: int,
+) -> None:
+    """Build ordered C128 decode indices using the existing Triton combiner."""
+    if seq_lens.numel() == 0:
+        return
+    if compress_ratio != 128 or top_k < 0 or top_k > combined_indices.shape[1]:
+        raise ValueError("invalid C128 decode index dimensions")
+    _COMBINE_TOPK_SWA_INDICES_KERNEL(
+        combined_indices,
+        combined_lens,
+        combined_indices[:, :top_k],
+        seq_lens,
+        seq_lens,
+        seq_lens,
+        M,
+        N,
+        TOP_K=top_k,
+        COMPRESS_RATIO=compress_ratio,
+        WINDOW_SIZE=window_size,
+        left_visible=is_valid,
+        decode_c128=True,
+    )
+
+
 def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
@@ -829,6 +863,9 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int
         IMAGE_WIDTH: int
         PADDED_TOP_K: int
+        DECODE_C128: bool
+        OUTPUT_WIDTH: int
+        PADDED_OUTPUT: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -858,7 +895,37 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: tl.constexpr,
         IMAGE_WIDTH: tl.constexpr,
         PADDED_TOP_K: tl.constexpr,
+        DECODE_C128: tl.constexpr,
+        OUTPUT_WIDTH: tl.constexpr,
+        PADDED_OUTPUT: tl.constexpr,
     ):
+        if DECODE_C128:
+            row = tl.program_id(0)
+            seq_len = tl.load(seq_lens_ptr + row)
+            topk_len = tl.minimum(seq_len // COMPRESS_RATIO, TOP_K)
+            swa_len = tl.minimum(seq_len, WINDOW_SIZE)
+            columns = tl.arange(0, PADDED_OUTPUT)
+            values = tl.where(
+                columns < topk_len,
+                M * row + topk_len - 1 - columns,
+                tl.where(
+                    columns < topk_len + swa_len,
+                    M * row + N + columns - topk_len,
+                    -1,
+                ),
+            )
+            tl.store(
+                combined_indices_ptr + row * combined_indices_stride + columns,
+                values,
+                columns < OUTPUT_WIDTH,
+            )
+            is_valid = tl.load(left_visible_ptr + row)
+            tl.store(
+                combined_lens_ptr + row,
+                tl.where(is_valid, topk_len + swa_len, 0),
+            )
+            return
+
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
         num_workers = tl.num_programs(1)
@@ -940,6 +1007,7 @@ class CombineTopkSwaIndicesKernel(
         active_topk_width: int,
         WINDOW_SIZE: int,
         image_width: int = 0,
+        decode_c128: bool = False,
     ) -> CompileKey:
         topk_width = active_topk_width if compress_ratio == 128 else index_topk
         topk = 0 if compress_ratio == 1 else topk_width
@@ -956,6 +1024,13 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
             IMAGE_WIDTH=image_width,
             PADDED_TOP_K=padded_topk,
+            DECODE_C128=decode_c128,
+            OUTPUT_WIDTH=(
+                ((topk + WINDOW_SIZE + 127) // 128 * 128) if decode_c128 else 0
+            ),
+            PADDED_OUTPUT=(
+                next_power_of_2(topk + WINDOW_SIZE) if decode_c128 else 0
+            ),
             input_variant=input_variant,
         )
 
@@ -989,7 +1064,7 @@ class CombineTopkSwaIndicesKernel(
         # Warm both the plain-window variant (batches without image spans)
         # and the in-image bidirectional variant.
         image_widths = [0, image_width] if image_width > 0 else [0]
-        return self._trace_dispatch(self.dispatch)(
+        keys = self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
                     topk_indices=True,
@@ -1016,6 +1091,20 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=window_size,
             image_width=image_widths,
         )
+        if envs.VLLM_BATCH_INVARIANT and 128 in compress_ratios:
+            keys += self._trace_dispatch(self.dispatch)(
+                topk_width=active_topk_widths,
+                topk_indices=True,
+                query_start_loc=True,
+                seq_lens=True,
+                gather_lens=True,
+                compress_ratio=128,
+                index_topk=index_topk,
+                active_topk_width=active_topk_widths,
+                WINDOW_SIZE=window_size,
+                decode_c128=True,
+            )
+        return list(dict.fromkeys(keys))
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
@@ -1037,9 +1126,14 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
             # Reproduce the runtime substitution: no-image batches launch with
             # ``topk_indices`` in the visibility pointer slots (see __call__).
-            left_visible=(int32_ptr if has_image else None),
+            left_visible=(
+                TritonWarmupTensor(torch.bool)
+                if compile_key.DECODE_C128
+                else int32_ptr if has_image else None
+            ),
             right_visible=(int32_ptr if has_image else None),
             max_image_tokens=compile_key.IMAGE_WIDTH,
+            decode_c128=compile_key.DECODE_C128,
         )
 
     @kernel_launcher
@@ -1060,11 +1154,12 @@ class CombineTopkSwaIndicesKernel(
         left_visible: torch.Tensor | None = None,
         right_visible: torch.Tensor | None = None,
         max_image_tokens: int = 0,
+        decode_c128: bool = False,
     ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
         has_image = left_visible is not None
         image_width = max_image_tokens if has_image else 0
-        return (num_reqs, self.NUM_WORKERS), dict(
+        return (num_reqs, 1 if decode_c128 else self.NUM_WORKERS), dict(
             combined_indices_stride=combined_indices.stride(0),
             topk_indices_stride=topk_indices.stride(0),
             left_visible_ptr=left_visible if has_image else topk_indices,
@@ -1074,6 +1169,11 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
             IMAGE_WIDTH=image_width,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
+            DECODE_C128=decode_c128,
+            OUTPUT_WIDTH=combined_indices.shape[-1] if decode_c128 else 0,
+            PADDED_OUTPUT=(
+                next_power_of_2(combined_indices.shape[-1]) if decode_c128 else 0
+            ),
         )
 
 

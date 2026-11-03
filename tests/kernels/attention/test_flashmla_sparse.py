@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-from vllm.models.deepseek_v4.common.ops.cache_utils import combine_topk_swa_indices
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    combine_c128_swa_decode,
+    combine_topk_swa_indices,
+)
 from vllm.platforms import current_platform
 
 
@@ -767,7 +770,7 @@ def test_flashinfer_rope_quant_matches_unfused_o_proj():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
-    "compress_ratio,top_k", [(4, 0), (4, 128), (4, 512), (128, 128)]
+    "compress_ratio,top_k", [(4, 0), (4, 128), (4, 512), (128, 128), (128, 512)]
 )
 @torch.inference_mode()
 def test_fused_decode_indices_match_existing_pipeline(
@@ -811,7 +814,13 @@ def test_fused_decode_indices_match_existing_pipeline(
     )
     expected_lens.masked_fill_(~is_valid, 0)
 
-    actual_indices = torch.empty_like(expected_indices)
+    if compress_ratio == 128:
+        # Decode metadata can view a narrow active width in a wider workspace.
+        actual_indices = torch.empty(
+            (rows, output_width + 128), dtype=torch.int32, device="cuda"
+        )[:, :output_width]
+    else:
+        actual_indices = torch.empty_like(expected_indices)
     actual_lens = torch.empty_like(expected_lens)
     if compress_ratio == 4:
         torch.ops._C.combine_topk_swa_decode(
@@ -827,7 +836,7 @@ def test_fused_decode_indices_match_existing_pipeline(
             window_size,
         )
     else:
-        torch.ops._C.combine_c128_swa_decode(
+        combine_c128_swa_decode(
             actual_indices,
             actual_lens,
             seq_lens,
@@ -841,6 +850,26 @@ def test_fused_decode_indices_match_existing_pipeline(
 
     torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
     torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
+
+    if compress_ratio == 128:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            combine_c128_swa_decode(
+                actual_indices,
+                actual_lens,
+                seq_lens,
+                is_valid,
+                row_stride,
+                compressed_width,
+                top_k,
+                compress_ratio,
+                window_size,
+            )
+        actual_indices.fill_(-99)
+        actual_lens.fill_(-99)
+        graph.replay()
+        torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+        torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("context_len", [0, 20, 127, 900])

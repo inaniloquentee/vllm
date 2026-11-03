@@ -35,10 +35,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! combined_lens, Tensor topk_indices, Tensor seq_lens, "
       "Tensor is_valid, int M, int N, int top_k, int compress_ratio, "
       "int window_size) -> ()");
-  ops.def(
-      "combine_c128_swa_decode(Tensor! combined_indices, "
-      "Tensor! combined_lens, Tensor seq_lens, Tensor is_valid, int M, "
-      "int N, int top_k, int compress_ratio, int window_size) -> ()");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -764,8 +760,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifndef USE_ROCM
   ops.impl("combine_topk_swa_decode",
            TORCH_BOX(&vllm::batch_invariant::combine_topk_swa_decode));
-  ops.impl("combine_c128_swa_decode",
-           TORCH_BOX(&vllm::batch_invariant::combine_c128_swa_decode));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
